@@ -1,0 +1,167 @@
+openapi: 3.0.3
+info:
+  title: LLM Queue and Resource Manager
+  version: 0.1.0
+  description: >-
+    Phase 0 contract. HTTP bindings are not implemented. Mutations are
+    idempotent; trusted v1 has no authentication.
+servers:
+  - url: http://127.0.0.1:8080
+tags:
+  - name: scheduler
+  - name: resource-manager
+  - name: provisioning
+  - name: health
+paths:
+  /schedulers/{schedulerId}/start:
+    post:
+      tags: [scheduler]
+      operationId: startScheduler
+      parameters: [{$ref: '#/components/parameters/SchedulerId'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {$ref: '#/components/requestBodies/StartRequest'}
+      responses: {200: {$ref: '#/components/responses/Session'}, default: {$ref: '#/components/responses/Error'}}
+  /schedulers/{schedulerId}/requests:
+    post:
+      tags: [scheduler]
+      operationId: enqueue
+      parameters: [{$ref: '#/components/parameters/SchedulerId'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {$ref: '#/components/requestBodies/EnqueueRequest'}
+      responses: {201: {$ref: '#/components/responses/Request'}, default: {$ref: '#/components/responses/Error'}}
+  /schedulers/{schedulerId}/requests/{requestId}:
+    get:
+      tags: [scheduler]
+      operationId: getRequest
+      parameters: [{$ref: '#/components/parameters/SchedulerId'}, {$ref: '#/components/parameters/RequestId'}]
+      responses: {200: {$ref: '#/components/responses/Request'}, default: {$ref: '#/components/responses/Error'}}
+  /schedulers/{schedulerId}/requests/{requestId}/watch:
+    get:
+      tags: [scheduler]
+      operationId: watchRequest
+      parameters: [{$ref: '#/components/parameters/SchedulerId'}, {$ref: '#/components/parameters/RequestId'}, {$ref: '#/components/parameters/LastEventId'}]
+      responses: {200: {$ref: '#/components/responses/Sse'}, default: {$ref: '#/components/responses/Error'}}
+  /schedulers/{schedulerId}/requests/{requestId}/cancel:
+    post:
+      tags: [scheduler]
+      operationId: cancelRequest
+      parameters: [{$ref: '#/components/parameters/SchedulerId'}, {$ref: '#/components/parameters/RequestId'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      responses: {200: {$ref: '#/components/responses/Request'}, default: {$ref: '#/components/responses/Error'}}
+  /schedulers/{schedulerId}/stop:
+    post:
+      tags: [scheduler]
+      operationId: stopScheduler
+      parameters: [{$ref: '#/components/parameters/SchedulerId'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {$ref: '#/components/requestBodies/StopRequest'}
+      responses: {200: {$ref: '#/components/responses/Ack'}, default: {$ref: '#/components/responses/Error'}}
+  /resource-manager/sessions:
+    post:
+      tags: [resource-manager]
+      operationId: startSession
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {$ref: '#/components/requestBodies/StartSessionRequest'}
+      responses: {201: {$ref: '#/components/responses/Session'}, default: {$ref: '#/components/responses/Error'}}
+  /resource-manager/sessions/{sessionToken}/submissions:
+    post:
+      tags: [resource-manager]
+      operationId: submit
+      parameters: [{$ref: '#/components/parameters/SessionToken'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {$ref: '#/components/requestBodies/SubmitRequest'}
+      responses: {202: {$ref: '#/components/responses/Ack'}, 429: {$ref: '#/components/responses/Backpressure'}, default: {$ref: '#/components/responses/Error'}}
+  /resource-manager/sessions/{sessionToken}/requests/{requestId}/cancel:
+    post:
+      tags: [resource-manager]
+      operationId: cancelResourceRequest
+      parameters: [{$ref: '#/components/parameters/SessionToken'}, {$ref: '#/components/parameters/RequestId'}, {$ref: '#/components/parameters/AttemptToken'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      responses: {202: {$ref: '#/components/responses/Ack'}, default: {$ref: '#/components/responses/Error'}}
+  /resource-manager/sessions/{sessionToken}/stop:
+    post:
+      tags: [resource-manager]
+      operationId: stopSession
+      parameters: [{$ref: '#/components/parameters/SessionToken'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      responses: {202: {$ref: '#/components/responses/Ack'}, default: {$ref: '#/components/responses/Error'}}
+  /resource-manager/sessions/{sessionToken}/watch:
+    get:
+      tags: [resource-manager]
+      operationId: watchProgress
+      parameters: [{$ref: '#/components/parameters/SessionToken'}, {$ref: '#/components/parameters/LastEventId'}]
+      responses: {200: {$ref: '#/components/responses/Sse'}, default: {$ref: '#/components/responses/Error'}}
+  /resource-manager/capacity:
+    get:
+      tags: [resource-manager]
+      operationId: getCapacity
+      responses: {200: {description: Capacity, content: {application/json: {schema: {$ref: '#/components/schemas/Capacity'}}}}, default: {$ref: '#/components/responses/Error'}}
+  /provisioning/verify-artifacts:
+    post:
+      tags: [provisioning]
+      operationId: verifyArtifacts
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {$ref: '#/components/requestBodies/ProvisionRequest'}
+      responses: {200: {$ref: '#/components/responses/Ack'}, default: {$ref: '#/components/responses/Error'}}
+  /provisioning/measure-capacity:
+    post:
+      tags: [provisioning]
+      operationId: measureCapacity
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {$ref: '#/components/requestBodies/ProvisionRequest'}
+      responses: {202: {$ref: '#/components/responses/Ack'}, default: {$ref: '#/components/responses/Error'}}
+  /provisioning/validate-profile:
+    post:
+      tags: [provisioning]
+      operationId: validateProfile
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {$ref: '#/components/requestBodies/ProfileRequest'}
+      responses: {200: {$ref: '#/components/responses/Ack'}, default: {$ref: '#/components/responses/Error'}}
+  /health/live:
+    get: {tags: [health], operationId: healthLive, responses: {200: {$ref: '#/components/responses/Health'}}}
+  /health/ready:
+    get: {tags: [health], operationId: healthReady, responses: {200: {$ref: '#/components/responses/Health'}, 503: {$ref: '#/components/responses/Health'}}}
+  /health/dependencies:
+    get: {tags: [health], operationId: healthDependencies, responses: {200: {$ref: '#/components/responses/Health'}}}
+  /metrics:
+    get: {tags: [health], operationId: metrics, responses: {200: {description: Metrics, content: {text/plain: {schema: {type: string}}}}}}
+components:
+  parameters:
+    SchedulerId: {name: schedulerId, in: path, required: true, schema: {type: string, minLength: 1}}
+    RequestId: {name: requestId, in: path, required: true, schema: {type: string, minLength: 1}}
+    SessionToken: {name: sessionToken, in: path, required: true, schema: {type: string, minLength: 1}}
+    AttemptToken: {name: Attempt-Token, in: header, required: true, schema: {type: string, minLength: 1}}
+    IdempotencyKey: {name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 1}}
+    LastEventId: {name: Last-Event-ID, in: header, required: false, schema: {type: string, minLength: 1}}
+  requestBodies:
+    StartRequest: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Start'}}}}
+    EnqueueRequest: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Enqueue'}}}}
+    StopRequest: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Stop'}}}}
+    StartSessionRequest: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/StartSession'}}}}
+    SubmitRequest: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Submit'}}}}
+    ProvisionRequest: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Provision'}}}}
+    ProfileRequest: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Profile'}}}}
+  responses:
+    Request: {description: Request, content: {application/json: {schema: {$ref: '#/components/schemas/Request'}}}}
+    Session: {description: Session, content: {application/json: {schema: {$ref: '#/components/schemas/Session'}}}}
+    Ack: {description: Accepted, content: {application/json: {schema: {$ref: '#/components/schemas/Ack'}}}}
+    Backpressure: {description: ResourceManager buffer is full; retry is not an attempt or failure, content: {application/json: {schema: {$ref: '#/components/schemas/Backpressure'}}}}
+    Health: {description: Health state, content: {application/json: {schema: {$ref: '#/components/schemas/Health'}}}}
+    Sse: {description: SSE events; send events with sequence and resume cursor, content: {text/event-stream: {schema: {$ref: '#/components/schemas/SseEnvelope'}}}}
+    Error: {description: Structured error, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  schemas:
+    ModelId: {type: string, enum: [SmolLM, CoEdIT, GECToR]}
+    Status: {type: string, enum: [scheduled, running, on_gpu, done, error, cancelled]}
+    Start: {type: object, additionalProperties: false, required: [modelId], properties: {modelId: {$ref: '#/components/schemas/ModelId'}}}
+    StartSession: {type: object, additionalProperties: false, required: [schedulerId, modelId], properties: {schedulerId: {type: string, minLength: 1}, modelId: {$ref: '#/components/schemas/ModelId'}}}
+    FunctionDescriptor: {type: object, additionalProperties: false, required: [name, args, dependencyResultIds], properties: {name: {type: string, minLength: 1}, args: {type: object, additionalProperties: true}, dependencyResultIds: {type: array, items: {type: string}}}}
+    Enqueue: {type: object, additionalProperties: false, required: [requestId, modelId, payloadReference], properties: {requestId: {type: string}, modelId: {$ref: '#/components/schemas/ModelId'}, payloadReference: {type: string}, dependencies: {type: array, items: {type: string}}, insertionMode: {type: string, enum: [append, skip-line]}, ready: {$ref: '#/components/schemas/FunctionDescriptor'}, template: {$ref: '#/components/schemas/FunctionDescriptor'}, resultTarget: {type: string}}}
+    Stop: {type: object, additionalProperties: false, required: [outcome], properties: {outcome: {type: string, enum: [error, cancelled]}, reason: {type: string}}}
+    Submit: {type: object, additionalProperties: false, required: [requestId, attemptToken, residencyGeneration, inputReference, contextSizeEstimate], properties: {requestId: {type: string}, attemptToken: {type: string}, residencyGeneration: {type: integer, minimum: 0}, inputReference: {type: string}, contextSizeEstimate: {type: integer, minimum: 1}, bucketIdentity: {type: string}}}
+    Provision: {type: object, additionalProperties: false, required: [modelId, parentPath, modelFile, resourceManagerType], properties: {modelId: {$ref: '#/components/schemas/ModelId'}, parentPath: {type: string}, modelFile: {type: string}, resourceManagerType: {type: string, enum: [ollama, transformers-coedit, gector]}, contextSizeEstimates: {type: array, items: {type: integer, minimum: 1}}, buckets: {type: array, items: {$ref: '#/components/schemas/Bucket'}}, benchmarkRequests: {type: array, items: {type: string}}}}
+    Bucket: {type: object, additionalProperties: false, required: [maxInputTokens, maxOutputTokens, generation, nativeBatchShape], properties: {maxInputTokens: {type: integer, minimum: 1}, maxOutputTokens: {type: integer, minimum: 1}, generation: {$ref: '#/components/schemas/Generation'}, nativeBatchShape: {type: array, items: {type: integer, minimum: 1}}, maxIterations: {type: integer, minimum: 1}, thresholds: {type: array, items: {type: number, minimum: 0, maximum: 1}}}}
+    Generation: {type: object, additionalProperties: false, required: [parameters, dtype], properties: {parameters: {type: object, additionalProperties: true}, dtype: {type: string, minLength: 1}}}
+    Profile: {type: object, additionalProperties: false, required: [modelId, gpuUuid, artifactManifestHash, modelHash, runtimeIdentity, adapterIdentity, profileIdentity, optimalParallelism, memorySafeN, bufferCapacity, safetyReservePercent, rawSamples], properties: {modelId: {$ref: '#/components/schemas/ModelId'}, gpuUuid: {type: string}, artifactManifestHash: {type: string}, modelHash: {type: string}, runtimeIdentity: {type: string}, adapterIdentity: {type: string}, profileIdentity: {type: string}, optimalParallelism: {type: integer, minimum: 1}, memorySafeN: {type: integer, minimum: 1}, bufferCapacity: {type: integer, minimum: 1}, safetyReservePercent: {type: integer, minimum: 0, maximum: 100}, contextSize: {type: integer, minimum: 1, nullable: true}, bucketIdentity: {type: string, nullable: true}, rawSamples: {type: array, items: {$ref: '#/components/schemas/Sample'}}}}
+    Sample: {type: object, additionalProperties: false, required: [concurrency, wave, successfulRequests, wallTimeMs, peakVramBytes, latencyMs], properties: {concurrency: {type: integer, minimum: 1}, wave: {type: integer, minimum: 0}, successfulRequests: {type: integer, minimum: 0}, wallTimeMs: {type: integer, minimum: 0}, peakVramBytes: {type: integer, minimum: 0}, latencyMs: {type: array, items: {type: integer, minimum: 0}}}}
+    Session: {type: object, additionalProperties: false, required: [sessionToken, schedulerId, modelId, residencyGeneration], properties: {sessionToken: {type: string}, schedulerId: {type: string}, modelId: {$ref: '#/components/schemas/ModelId'}, residencyGeneration: {type: integer, minimum: 0}}}
+    Request: {type: object, additionalProperties: false, required: [requestId, status, sequence], properties: {requestId: {type: string}, status: {$ref: '#/components/schemas/Status'}, sequence: {type: integer, minimum: 0}, runningToDoneMs: {type: integer, minimum: 0, nullable: true}, timeOnGpuMs: {type: integer, minimum: 0, nullable: true}, gpuTimingComplete: {type: boolean}}}
+    Capacity: {type: object, additionalProperties: false, required: [modelId, optimalParallelism, bufferCapacity, admissionLimit, profileIdentity], properties: {modelId: {$ref: '#/components/schemas/ModelId'}, optimalParallelism: {type: integer, minimum: 1}, bufferCapacity: {type: integer, minimum: 1}, admissionLimit: {type: integer, minimum: 1}, profileIdentity: {type: string}}}
+    SseEnvelope: {type: object, additionalProperties: false, required: [sequence, cursor, event, data], properties: {sequence: {type: integer, minimum: 0}, cursor: {type: string, minLength: 1}, event: {type: string, enum: [status, progress]}, data: {oneOf: [{$ref: '#/components/schemas/Request'}, {$ref: '#/components/schemas/Progress'}]}}}
+    Progress: {type: object, additionalProperties: false, required: [requestId, status, sequence], properties: {requestId: {type: string}, status: {$ref: '#/components/schemas/Status'}, sequence: {type: integer, minimum: 0}, message: {type: string}}}
+    Ack: {type: object, additionalProperties: false, required: [accepted, operationId], properties: {accepted: {type: boolean}, operationId: {type: string}}}
+    Backpressure: {type: object, additionalProperties: false, required: [code, retryable], properties: {code: {type: string, enum: [capacity_backpressure]}, retryable: {type: boolean, enum: [false]}}}
+    Health: {type: object, additionalProperties: false, required: [ready, details], properties: {ready: {type: boolean}, details: {type: object, additionalProperties: false, properties: {sqlite: {type: boolean}, gpu: {type: boolean}, artifacts: {type: boolean}, profile: {type: boolean}, cleanup: {type: boolean}}}}}
+    Error: {type: object, additionalProperties: false, required: [code, message, retryable], properties: {code: {type: string, enum: [idempotency_conflict, stale_session, stale_attempt, function_unavailable, invalid_request, capacity_unavailable]}, message: {type: string}, retryable: {type: boolean}, attemptToken: {type: string}}}

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "design",
+  "subagent_depth": 2,
+  "permission": {
+    "skill": {
+      "*": "allow",
+      "goal-oriented-design": "deny"
+    }
+  },
+  "agent": {
+    "build": {
+      "disable": true
+    },
+    "plan": {
+      "disable": true
+    },
+    "general": {
+      "disable": true
+    },
+    "explore": {
+      "disable": true
+    }
+  }
+}

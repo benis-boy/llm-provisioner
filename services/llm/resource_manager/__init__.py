@@ -1,0 +1,1 @@
+"""Resource manager contract types."""
