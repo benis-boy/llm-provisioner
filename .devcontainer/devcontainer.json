@@ -5,11 +5,14 @@
     "context": ".."
   },
   "remoteUser": "vscode",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+  },
   "mounts": [
     "source=/mnt/d/AdeptusMechanicus/LLMs,target=/workspaces/llm-provider/LLMs,type=bind",
     "source=${localEnv:HOME}/.config/opencode,target=/home/vscode/.config/opencode,type=bind,readonly",
     "source=${localEnv:HOME}/.local/share/opencode/auth.json,target=/home/vscode/.local/share/opencode/auth.json,type=bind",
     "source=${localEnv:HOME}/.local/share/opencode/account.json,target=/home/vscode/.local/share/opencode/account.json,type=bind"
   ],
-  "postCreateCommand": "test -s /home/vscode/.local/share/opencode/auth.json && opencode --version"
+  "postCreateCommand": "bash -ceu 'test -s /home/vscode/.local/share/opencode/auth.json && opencode --version && python3 -m venv .venv && .venv/bin/python -m pip install --editable .'"
 }

@@ -4,9 +4,13 @@ The container installs OpenCode `1.18.31` and bind-mounts the host's OpenCode
 configuration and account files so it uses the same authenticated accounts
 without copying credentials into the image or repository.
 
+It also provides Python 3, pip, and venv. Post-create setup creates a project-local
+`.venv` and installs this project in editable mode into that environment.
+
 Required host paths:
 
-- `/mnt/d/AdeptusMechanicus/LLMs` is mounted at `/workspace/LLMs`.
+- `/mnt/d/AdeptusMechanicus/LLMs` is mounted at
+  `/workspaces/llm-provider/LLMs`.
 - `$HOME/.config/opencode` is mounted read-only at
   `/home/vscode/.config/opencode`.
 - `$HOME/.local/share/opencode/auth.json` and `account.json` are mounted at the

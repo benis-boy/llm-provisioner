@@ -9,6 +9,9 @@ RUN apt-get update \
         git \
         nodejs \
         npm \
+        python3 \
+        python3-pip \
+        python3-venv \
     && npm install --global "opencode-ai@${OPENCODE_VERSION}" \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*
@@ -16,8 +19,6 @@ RUN apt-get update \
 RUN mkdir -p \
         /home/vscode/.config/opencode \
         /home/vscode/.local/share/opencode \
-        /workspace/LLMs \
     && chown -R vscode:vscode \
         /home/vscode/.config \
-        /home/vscode/.local \
-        /workspace
+        /home/vscode/.local

@@ -1,2 +1,3 @@
 /LLMs
 *.pyc
+.venv
