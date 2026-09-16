@@ -8,7 +8,8 @@ without losing accepted requests or reporting misleading progress.
 
 This checkout now contains a Python contract foundation, synchronous SQLite WAL
 queue primitives, content-addressed result storage, a durable local publisher,
-and focused unit/local integration tests. It does **not** yet contain the async
+durable optional-function intent with fail-closed claim gates, and focused
+unit/local integration tests. It does **not** yet contain the async
 QueueScheduler, ResourceManager server, provider adapters, production image, or
 provisioning runtime. Unchecked work remains target-state design. Historical
 capacity notes are not implementation evidence.
@@ -25,9 +26,11 @@ Work is tracked in logical slices, not whole-phase completion claims. See
 - [ ] **Phase 0 exit:** fully validate OpenAPI and client/server bindings; finish
   profile SQLite schema and exact artifact manifests after compatibility review.
   Current OpenAPI tests are text-contract checks, not a YAML/OpenAPI validator.
-- [ ] **Phase 1 — Compatibility spike and production image:** blocked here by
-  missing Docker/NVIDIA runtime, target GPU/NVML, Ollama and inference packages.
-  No runtime/dependency pins or artifact hashes have been invented.
+- [ ] **Phase 1 — Compatibility spike and production image:** Docker and NVIDIA
+  GPU access are now verified through the host daemon. The three-model offline
+  compatibility matrix, exact artifacts and production runtime remain unverified;
+  no runtime/dependency pins or artifact hashes have been invented. See
+  [environment evidence](implementation-decisions.md#environment-reassessment-2026-09-16).
 - [x] **Slice B — Durable queue primitives:** SQLite WAL transactions, exact
   enqueue idempotency, immutable intent references, separate ordered positions,
   attempts, leases, handoffs, cancellation/submission outbox and event cursors.
@@ -38,9 +41,14 @@ Work is tracked in logical slices, not whole-phase completion claims. See
 - [x] **Slice D — Durable local results:** fsynced content-addressed files,
   verified idempotent local publication receipts, pending handoff replay, and
   acknowledged-only `done` transitions.
+- [x] **Slice E — Durable optional-function intent:** canonical ready/template
+  descriptors, dependency-reference validation, mutation-safe enqueue snapshots,
+  descriptor-sensitive idempotency and additive legacy database upgrades.
+  Direct claims of descriptor-bearing work fail closed without dispatch side
+  effects. Function execution and polling are not implemented by this slice.
 - [ ] **Phase 2 exit:** integrate real ResourceManager session reconciliation
-  and outbox delivery; persist optional function descriptors in queue intent;
-  finish operation-replay and guarded-transition behavioral coverage.
+  and outbox delivery; finish operation-replay and guarded-transition behavioral
+  coverage.
 - [ ] **Phase 3 — Async QueueScheduler:** bounded eligibility scans, registered
   ready/template execution, watch delivery, completion-only watchdog, dispatch,
   cancellation reconciliation and full async lifecycle remain unimplemented.
@@ -49,7 +57,7 @@ Work is tracked in logical slices, not whole-phase completion claims. See
 - [ ] **Phase 6 — Production E2E, observability, deployment and runbooks.**
 
 Verification: `python3 -m unittest discover -s tests -p 'test_*.py'` passes
-**35 tests**; `python3 -m compileall -q services tests` passes. These are unit/local
+**47 tests**; `python3 -m compileall -q services tests` passes. These are unit/local
 SQLite integration results, **not** qualifying provider/GPU E2E evidence. No leaf
 goal is `done`.
 
@@ -190,7 +198,9 @@ The durable structure is an ordered list with graph references:
   but impose no graph-depth limit.
 - Optional ready/template logic uses a consumer-friendly descriptor containing
   a registered function name, JSON-compatible arguments, and referenced
-  dependency result IDs. The consumer owns registration and execution.
+  dependency result IDs. These IDs are declared same-scheduler dependency request
+  IDs, to be resolved to their acknowledged durable result references, not file
+  paths or arbitrary result identities. The consumer owns registration and execution.
   Templates must support programmatic composition comparable to Go templates.
   Function errors are request errors; a function may intentionally consult
   external state, so purity is not required. QueueScheduler reevaluates blocked
@@ -777,9 +787,9 @@ No leaf becomes `done` from unit tests alone.
 
 ## 10. Suggested initial repository layout
 
-The source layout is not established in this checkout. Adopt one canonical
-layout rather than creating duplicate service/library implementations. A
-reasonable starting boundary is:
+The queue/contracts source layout is established in this checkout. Retain one
+canonical layout rather than creating duplicate service/library implementations.
+The following includes both existing and planned boundaries:
 
 ```text
 services/llm/queue/                 # contracts, store, scheduler
@@ -804,7 +814,8 @@ tests/e2e/
    Platform implementation owns remaining validated bindings.
 3. Settled: consumer-registered Python sync/async functions; descriptors contain
    a name, JSON-compatible arguments and dependency result IDs. Application
-   implementation owns runtime execution and durable descriptor integration.
+    implementation owns runtime execution; durable descriptor integration is
+    implemented in Slice E, with claims blocked until evaluation exists.
 4. Settled: `publish(request_id, attempt_token, result_reference, idempotency_key)`;
    local publication durably acknowledges verified content-addressed bytes.
    External publishers own duplicate-key no-ops; queue implementation owns delivery.

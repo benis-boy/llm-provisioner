@@ -7,6 +7,7 @@ the core or its current tests.
 ## Boundaries
 
 - `services/llm/queue/contracts.py`: status adjacency and typed boundary records.
+  Strict canonical function-descriptor encoding/decoding validates durable intent.
 - `services/llm/queue/store.py`: authoritative SQLite schema and transactional
   request, position, attempt, lease, outbox, event and local session primitives.
 - `services/llm/queue/results.py`: content-addressed bytes and local publisher
@@ -48,8 +49,11 @@ example and receipt replay across restart.
 - Starting a different identity supersedes old nonterminal work in this database.
   Cross-database/process coordination needs the future ResourceManager.
 - `claim` gates dependencies and retry eligibility but does not select the next
-  request. The future bounded scheduler must choose eligible FIFO and evaluate
-  readiness/templates; arbitrary direct claims are not a FIFO scheduler.
+  request. Any non-null `ready` or `template` descriptor additionally blocks a
+  claim without creating an attempt, submit record or claim event. The future
+  bounded scheduler must choose eligible FIFO and evaluate readiness/templates;
+  arbitrary direct claims are not a FIFO scheduler. Other ungated requests can
+  still be claimed; no optional functions execute inside SQLite transactions.
 - Missing/self/cyclic dependencies are rejected before enqueue acknowledgement
   with `DependencyError`. Failed dependencies become `dependency_failed` when
   evaluated. Recursive propagation requires scheduler scans.
@@ -61,6 +65,31 @@ example and receipt replay across restart.
   loop must coordinate publication and cancellation; a caller must not publish
   a previously fetched outbox record without reconciling current ownership.
 
+## Durable optional-function intent
+
+`enqueue(..., ready=FunctionDescriptor(...), template=FunctionDescriptor(...))`
+accepts keyword-only descriptors. Each contains a registered name, finite JSON
+arguments and dependency result IDs. Those IDs must be among the request's
+declared same-scheduler dependency request IDs; future execution resolves them to
+acknowledged durable result references. Function implementations are never stored.
+
+Arguments are revalidated and serialized at enqueue, so later caller mutations
+cannot change accepted intent. Equivalent object-key ordering replays as a no-op;
+changed descriptor content conflicts with the accepted request's identity. Raw
+request rows expose nullable canonical JSON `ready`/`template` columns;
+`QueueStore.descriptor(row, "ready")` (or `"template"`) returns the typed value.
+
+Opening a pre-Slice-E database transactionally adds nullable columns under a
+SQLite write lock without recreating the database or rewriting existing records.
+Absent descriptors retain the original fingerprint format and enqueue replay.
+Recovery retains descriptor intent. Cancellation, stop and session fencing still
+apply to descriptor-bearing work.
+
+This is persistence and safe blocking only: even a registered, always-true ready
+function cannot currently enable a claim. Function execution, missing-name
+`function_unavailable` classification, result resolution, template validation,
+polling and eligibility invalidation belong to the future async scheduler.
+
 ## Verification and remaining work
 
 ```sh
@@ -68,10 +97,10 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 python3 -m compileall -q services tests
 ```
 
-The 35 current tests use temporary SQLite databases, independent connections,
+The 47 current tests use temporary SQLite databases, independent connections,
 an abruptly exiting subprocess, and local result publication. Test-owned temporary
 directories clean up prerequisites. They do not establish all operation replay
 cases, every guarded lifecycle transition, or a production provider boundary.
-Optional-function persistence/execution, async outbox delivery, scheduler
+Optional-function execution, async outbox delivery, scheduler
 watchdog, ResourceManager admission/residency, adapters, profile persistence,
 provisioning and deployment remain unfinished. All production proof remains open.

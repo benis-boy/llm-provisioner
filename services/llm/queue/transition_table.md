@@ -37,7 +37,11 @@ failures and idle timeout stop the
 whole scheduler. GPU timing may be incomplete and never blocks publication.
 
 Dispatch is eligible FIFO. Dependency completion, registered function
-availability, readiness, and template validity are gates. Skip-line groups
+availability, readiness, and template validity are gates. In the current
+boundary, any request carrying a durable `ready` or `template` descriptor is
+fail-closed at claim: it remains scheduled and emits no attempt, submit, or
+claim event. A future scheduler-owned evaluator may open that gate; descriptor
+persistence is not execution. Skip-line groups
 extend at the group tail before their scheduled anchor; with no scheduled
 anchor, insertion falls back to append. Rank, insertion sequence, anchor, and
 group sequence are distinct durable fields. Optional functions poll every one

@@ -7,6 +7,7 @@ transactional idempotency, leasing, fencing, and transition guards.
 from dataclasses import dataclass, field
 from enum import Enum
 import inspect
+import json
 import math
 import numbers
 from typing import Any, Callable, Mapping
@@ -56,6 +57,44 @@ def _json(value: Any) -> None:
     raise ValueError("value must be JSON-compatible")
 
 
+def _descriptor_value(descriptor: "FunctionDescriptor") -> dict[str, Any]:
+    """Validate and return the wire shape; serialization detaches nested values."""
+    if not isinstance(descriptor, FunctionDescriptor):
+        raise ValueError("function descriptor must be a FunctionDescriptor")
+    _text(descriptor.name, "function name")
+    if not isinstance(descriptor.args, Mapping):
+        raise ValueError("function arguments must be a mapping")
+    args = dict(descriptor.args)
+    if any(not isinstance(key, str) for key in args):
+        raise ValueError("function argument keys must be text")
+    _json(args)
+    ids = descriptor.dependency_result_ids
+    if not isinstance(ids, (list, tuple)) or any(not isinstance(item, str) or not item for item in ids):
+        raise ValueError("dependency result IDs must be a list or tuple of non-empty text")
+    return {"name": descriptor.name, "args": args, "dependency_result_ids": list(ids)}
+
+
+def serialize_function_descriptor(descriptor: "FunctionDescriptor") -> str:
+    """Canonicalize and snapshot an optional function intent."""
+    return json.dumps(_descriptor_value(descriptor), sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def deserialize_function_descriptor(value: str) -> "FunctionDescriptor":
+    """Decode only the exact durable descriptor shape."""
+    try:
+        raw = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("malformed function descriptor") from exc
+    if not isinstance(raw, dict) or set(raw) != {"name", "args", "dependency_result_ids"}:
+        raise ValueError("malformed function descriptor")
+    if not isinstance(raw["args"], dict) or not isinstance(raw["dependency_result_ids"], list):
+        raise ValueError("malformed function descriptor")
+    descriptor = FunctionDescriptor(raw["name"], raw["args"], tuple(raw["dependency_result_ids"]))
+    # Re-serialize to reject any shape that the constructor did not fully cover.
+    _descriptor_value(descriptor)
+    return descriptor
+
+
 @dataclass(frozen=True)
 class FunctionDescriptor:
     name: str
@@ -64,9 +103,16 @@ class FunctionDescriptor:
 
     def __post_init__(self) -> None:
         _text(self.name, "function name")
-        _json(dict(self.args))
-        if any(not isinstance(item, str) or not item for item in self.dependency_result_ids):
-            raise ValueError("dependency result IDs must be non-empty text")
+        if not isinstance(self.args, Mapping):
+            raise ValueError("function arguments must be a mapping")
+        args = dict(self.args)
+        if any(not isinstance(key, str) for key in args):
+            raise ValueError("function argument keys must be text")
+        _json(args)
+        if not isinstance(self.dependency_result_ids, (list, tuple)) or any(
+            not isinstance(item, str) or not item for item in self.dependency_result_ids
+        ):
+            raise ValueError("dependency result IDs must be a list or tuple of non-empty text")
 
 
 class FunctionRegistry:
@@ -125,6 +171,11 @@ class RequestRecord:
             raise ValueError("dependencies must be non-empty text")
         if self.request_id in self.dependencies:
             raise ValueError("request cannot depend on itself")
+        for descriptor in (self.ready, self.template):
+            if descriptor is not None:
+                value = _descriptor_value(descriptor)
+                if not set(value["dependency_result_ids"]).issubset(self.dependencies):
+                    raise ValueError("function descriptor references undeclared dependency")
         for value, name in ((self.running_at, "running_at"), (self.done_at, "done_at"), (self.next_attempt_at, "next_attempt_at")):
             if value is not None and (not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value)):
                 raise ValueError(f"{name} must be a finite number")

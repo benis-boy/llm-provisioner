@@ -70,7 +70,8 @@ residency, concurrency, and buffering stay within proved operational limits.
 Detailed target contracts and sequencing:
 [`docs/queue-scheduler-resource-manager-plan.md`](../../../../docs/queue-scheduler-resource-manager-plan.md).
 
-Implementation boundary: G1–G3 currently have synchronous SQLite/result primitives
-and unit/local integration evidence only. Async scheduling, provider/server
+Implementation boundary: G1–G3 currently have synchronous SQLite/result primitives,
+durable optional-function descriptors with fail-closed claims, and unit/local
+integration evidence only. Function evaluation, async scheduling, provider/server
 boundaries and qualifying E2E remain absent. G4 has contract definitions, not
 implemented GPU service, and remains target.

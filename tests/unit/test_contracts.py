@@ -16,6 +16,7 @@ from services.llm.queue.contracts import (
     InsertionMode,
     ModelId,
     QueuePosition,
+    RequestRecord,
     RequestStatus,
     can_transition,
 )
@@ -68,6 +69,38 @@ class ContractTests(unittest.TestCase):
         for value in (math.nan, math.inf, -math.inf):
             with self.assertRaises(ValueError):
                 FunctionDescriptor("ready", {"value": value})
+
+    def test_request_record_validates_descriptor_shapes_and_declared_dependencies(self):
+        ready = FunctionDescriptor("ready", {"value": 1}, ("dep",))
+        template = FunctionDescriptor("template", {}, ("dep",))
+        record = RequestRecord("scheduler", "request", "key", ModelId.SMOLLM, "payload",
+                               dependencies=("dep",), ready=ready, template=template)
+        self.assertEqual(record.ready, ready)
+        for kwargs in (
+            {"ready": "not-a-descriptor"},
+            {"template": object()},
+            {"ready": FunctionDescriptor("ready", {}, ("missing",))},
+            {"template": FunctionDescriptor("template", {}, ("missing",))},
+        ):
+            with self.assertRaises((ValueError, TypeError)):
+                RequestRecord("scheduler", "request", "key", ModelId.SMOLLM, "payload", **kwargs)
+
+    def test_request_record_rejects_descriptor_args_mutated_to_invalid_json(self):
+        args = {"value": 1}
+        descriptor = FunctionDescriptor("ready", args)
+        args["value"] = math.nan
+        with self.assertRaises(ValueError):
+            RequestRecord("scheduler", "request", "key", ModelId.SMOLLM, "payload", ready=descriptor)
+
+    def test_function_descriptor_wire_shape_is_strict_and_canonical(self):
+        from services.llm.queue.contracts import deserialize_function_descriptor, serialize_function_descriptor
+
+        descriptor = FunctionDescriptor("ready", {"z": 1, "a": [True]}, ("dep",))
+        encoded = serialize_function_descriptor(descriptor)
+        self.assertEqual(encoded, '{"args":{"a":[true],"z":1},"dependency_result_ids":["dep"],"name":"ready"}')
+        self.assertEqual(deserialize_function_descriptor(encoded), descriptor)
+        with self.assertRaises(ValueError):
+            deserialize_function_descriptor('{"name":"x","args":{},"dependency_result_ids":"dep"}')
 
     def test_queue_position_supports_append_fallback_and_group_metadata(self):
         QueuePosition("r1", rank=4, insertion_sequence=2, insertion_mode=InsertionMode.SKIP_LINE, group_sequence=9, group_anchor="anchor")

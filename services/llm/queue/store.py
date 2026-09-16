@@ -15,7 +15,10 @@ import time
 from dataclasses import dataclass
 from typing import Iterable
 
-from .contracts import InsertionMode, ModelId, RequestStatus, TERMINAL, can_transition
+from .contracts import (
+    FunctionDescriptor, InsertionMode, ModelId, RequestStatus, TERMINAL, can_transition,
+    deserialize_function_descriptor, serialize_function_descriptor,
+)
 
 
 class QueueError(Exception):
@@ -55,10 +58,16 @@ class Session:
 
 
 def _fingerprint(payload_reference: str, dependencies: tuple[str, ...],
-                  insertion_mode: InsertionMode, result_target: str,
-                  request_id: str) -> str:
+                   insertion_mode: InsertionMode, result_target: str,
+                   request_id: str, ready: str | None = None,
+                   template: str | None = None) -> str:
+    # Keep the original pre-Slice-E identity byte-for-byte when both optional
+    # intents are absent, so replaying an old enqueue remains compatible.
+    values = [request_id, payload_reference, dependencies, insertion_mode.value, result_target]
+    if ready is not None or template is not None:
+        values.extend([ready, template])
     value = json.dumps(
-        [request_id, payload_reference, dependencies, insertion_mode.value, result_target],
+        values,
         separators=(",", ":"),
     )
     return hashlib.sha256(value.encode()).hexdigest()
@@ -90,6 +99,7 @@ class QueueStore:
                 model_id TEXT NOT NULL, payload_reference TEXT NOT NULL,
                 dependencies TEXT NOT NULL, insertion_mode TEXT NOT NULL,
                 result_target TEXT NOT NULL, fingerprint TEXT NOT NULL,
+                ready TEXT, template TEXT,
                 idempotency_key TEXT, status TEXT NOT NULL,
                 cancellation INTEGER NOT NULL DEFAULT 0,
                 running_at REAL, done_at REAL, next_attempt_at REAL,
@@ -138,6 +148,18 @@ class QueueStore:
             );
             """
         )
+        # This is intentionally an additive, transactional upgrade rather than
+        # a recreate: positions, attempts, events, and outbox rows are sacred.
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            columns = {row[1] for row in self.db.execute("PRAGMA table_info(requests)")}
+            for name in ("ready", "template"):
+                if name not in columns:
+                    self.db.execute(f"ALTER TABLE requests ADD COLUMN {name} TEXT")
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
         model = self.db.execute("SELECT value FROM meta WHERE key='model_id'").fetchone()
         if not model:
             self.db.execute(
@@ -323,18 +345,39 @@ class QueueStore:
             (self.scheduler_id, request_id),
         ).fetchone()
 
+    @staticmethod
+    def descriptor(row, field: str) -> FunctionDescriptor | None:
+        """Decode a descriptor from a raw request row without changing the row API."""
+        if field not in ("ready", "template"):
+            raise ValueError("descriptor field must be ready or template")
+        value = row[field]
+        return None if value is None else deserialize_function_descriptor(value)
+
     def enqueue(self, request_id: str, payload_reference: str,
-                dependencies: Iterable[str] = (),
-                insertion_mode: InsertionMode = InsertionMode.APPEND,
-                result_target: str = "local", idempotency_key: str | None = None):
+                 dependencies: Iterable[str] = (),
+                 insertion_mode: InsertionMode = InsertionMode.APPEND,
+                 result_target: str = "local", idempotency_key: str | None = None,
+                 *, ready: FunctionDescriptor | None = None,
+                 template: FunctionDescriptor | None = None):
         if not isinstance(idempotency_key, str) or not idempotency_key:
             raise ValueError("idempotency_key is required")
         mode = InsertionMode(insertion_mode)
         deps = tuple(dependencies)
+        for dependency in deps:
+            if not isinstance(dependency, str) or not dependency:
+                raise DependencyError("dependencies must be non-empty text")
+        ready_json = None if ready is None else serialize_function_descriptor(ready)
+        template_json = None if template is None else serialize_function_descriptor(template)
+        descriptor_ids = set()
+        for descriptor_json in (ready_json, template_json):
+            if descriptor_json is not None:
+                descriptor_ids.update(deserialize_function_descriptor(descriptor_json).dependency_result_ids)
+        if not descriptor_ids.issubset(set(deps)):
+            raise DependencyError("function descriptor references undeclared dependency")
         self._begin()
         try:
             self._require_accepting()
-            fingerprint = _fingerprint(payload_reference, deps, mode, result_target, request_id)
+            fingerprint = _fingerprint(payload_reference, deps, mode, result_target, request_id, ready_json, template_json)
             existing = self.db.execute(
                 "SELECT * FROM requests WHERE scheduler_id=? AND request_id=?",
                 (self.scheduler_id, request_id),
@@ -371,11 +414,11 @@ class QueueStore:
             rank, anchor = self._insert_rank(mode)
             self.db.execute(
                 "INSERT INTO requests(request_id,scheduler_id,model_id,payload_reference,"
-                "dependencies,insertion_mode,result_target,fingerprint,idempotency_key,status) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "dependencies,insertion_mode,result_target,fingerprint,ready,template,idempotency_key,status) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (request_id, self.scheduler_id, self.model_id.value, payload_reference,
-                 json.dumps(deps), mode.value, result_target, fingerprint,
-                 idempotency_key, RequestStatus.SCHEDULED.value),
+                  json.dumps(deps), mode.value, result_target, fingerprint,
+                  ready_json, template_json, idempotency_key, RequestStatus.SCHEDULED.value),
             )
             self.db.execute(
                 "INSERT INTO positions(request_id,rank,insertion_seq,mode,anchor,group_tail) "
@@ -497,6 +540,11 @@ class QueueStore:
                 self.db.execute("COMMIT")
                 return None
             if any(status != RequestStatus.DONE.value for status in dependency_statuses):
+                self.db.execute("ROLLBACK")
+                return None
+            # Slice E persists intent but does not let a generic claim path
+            # execute it. A future scheduler-owned evaluator must own this gate.
+            if row["ready"] is not None or row["template"] is not None:
                 self.db.execute("ROLLBACK")
                 return None
             token = secrets.token_urlsafe(24)
