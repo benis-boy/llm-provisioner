@@ -7,6 +7,7 @@ from services.llm.queue.contracts import ModelId
 from services.llm.resource_manager.contracts import CapacityProfile, SampleMetadata
 from services.llm.resource_manager.core import ResourceManager, ResourceManagerError
 from services.llm.resource_manager.protocol import EventKind, ProviderResponse
+from services.llm.providers.python_process import WorkerRequestValidationError
 
 
 def profile(model=ModelId.SMOLLM, p=1, context=128):
@@ -74,6 +75,23 @@ class ResourceManagerTests(unittest.IsolatedAsyncioTestCase):
             await self.rm.submit(self.session.session_token, "r2", "a2", b"x",
                                  idempotency_key="context", context_size=129)
         with self.assertRaises(ResourceManagerError): await self.rm.submit(self.session.session_token, "r", "a", b"bad", idempotency_key="bad", context_size=128)
+
+    async def test_child_validation_failure_releases_active_slot_and_session(self):
+        child_calls = 0
+        async def execute(request_id, payload):
+            nonlocal child_calls
+            child_calls += 1
+            if payload == b"too-long":
+                raise WorkerRequestValidationError("request validation")
+            return ProviderResponse(b"result")
+        self.provider.execute = execute
+        await self.submit("bad-child", "a", b"too-long")
+        await asyncio.sleep(0)
+        self.assertEqual(child_calls, 1)
+        self.assertEqual(len(self.rm._active), 0)
+        self.assertEqual(len(self.rm._buffer), 0)
+        accepted = await self.submit("after", "a", b"valid")
+        self.assertTrue(accepted.accepted)
 
     async def test_buffered_event_is_not_admission(self):
         await self.submit("r1", "a1"); await asyncio.sleep(0)

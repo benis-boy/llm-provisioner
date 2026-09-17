@@ -33,6 +33,32 @@ class CoEdITAdapterCheckTests(unittest.TestCase):
         self.assertEqual((profile.optimal_parallelism, profile.memory_safe_n, profile.buffer_capacity), (1, 1, 1))
         self.assertEqual(profile.bucket_identity, check.BUCKET)
 
+    def test_p2_profile_is_explicitly_unmeasured_and_exact_bucket(self):
+        with patch.object(check, "_runtime_identity", return_value="candidate:test-runtime"):
+            profile = check._profile("a" * 64, "b" * 64, "GPU-test", 2)
+        self.assertEqual(profile.profile_identity, "unmeasured-coedit-adapter-check")
+        self.assertEqual((profile.optimal_parallelism, profile.memory_safe_n, profile.buffer_capacity), (2, 2, 2))
+        self.assertEqual(profile.bucket_identity, "coedit:p2:input128:output64:float16:beams1:nosample")
+
+    def test_batch_evidence_rejects_serialized_or_dropped_observations(self):
+        allocator = {"baseline_allocated": 10, "baseline_reserved": 20, "peak_allocated": 30,
+                     "peak_reserved": 40, "final_allocated": 10, "final_reserved": 20}
+        observation = {"batch_size": 1, "execution_started": 1, "execution_ended": 2,
+                       "cuda_synchronized": True, "allocator": allocator, "request_ids": ("a", "b")}
+        self.assertFalse(check._check_batch_observation((observation,), 0, ("a", "b"), 2))
+        observation["batch_size"] = 2
+        self.assertFalse(check._check_batch_observation((observation,), 1, ("a", "b"), 2))
+        malformed = dict(observation)
+        malformed.pop("request_ids")
+        self.assertFalse(check._check_batch_observation((malformed,), 0, ("a", "b"), 2))
+
+    def test_batch_evidence_rejects_unknown_allocator_fields(self):
+        allocator = {"baseline_allocated": 1, "baseline_reserved": 2, "peak_allocated": 3,
+                     "peak_reserved": 4, "final_allocated": 1, "final_reserved": 2, "extra": 0}
+        observation = {"batch_size": 2, "execution_started": 1, "execution_ended": 2,
+                       "cuda_synchronized": True, "allocator": allocator, "request_ids": ("a", "b")}
+        self.assertFalse(check._check_batch_observation((observation,), 0, ("a", "b"), 2))
+
     def test_candidate_manifest_selects_exact_coedit_record(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

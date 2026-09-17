@@ -175,3 +175,54 @@ owned cleanup. They include foreign allocations and are not execution peaks,
 incremental per-request VRAM, or measured capacity. Concurrent provider execution,
 memory-safe bounds and throughput-optimal profiles remain unproved; G4.1/G4.2/
 G4.3 remain **partial**.
+
+The latest independent focused run passed 101 tests in 3.816 seconds, including
+CoEdIT native-batch and capacity-check suites. An offline network-disabled
+adapter image build passed with image manifest
+`sha256:dc7a0903f0b86734f373316537766b18262fee90cc554dd44a431066b7612f9d`.
+The latest actual CoEdIT p=16 candidate run failed closed during warmup with
+`native_batch_correlation` after a native 14+2 split despite substantial
+whole-device free memory; p=1,2,4,5,7,8,10,12,13,15 had four measured waves.
+This distinguishes scheduling/batch-correlation failure from a memory bound,
+does not establish useful native concurrency or a profile, and leaves all goals
+partial. The owned container was removed and verified absent; foreign work was
+not controlled. CoEdIT admission now avoids serialized child tokenizer RPCs by
+performing bounded local envelope/bucket checks; authoritative validation of all
+items remains child-side before model execution, with only typed request
+rejection recoverable. The ordinary fixed 5 ms batching policy and default p=1
+remain unchanged. Focused verification passes 122 tests, compilation and
+whitespace checks pass, but no subsequent GPU run proves p=16 or approves a
+capacity profile. G4.1/G4.2/G4.3 remain partial.
+
+The subsequent offline CoEdIT p16 throughput candidate passed. Authoritative
+per-row decoder workload witnesses also passed all59 throughput waves at
+input128/output64 (135 focused tests). Incremental memory discovery now passes
+every p1..16 with four repeats:64 waves/544 requests, full maximum workload
+witnesses and owned cleanup. Resumable per-wave terminal cursors fix retained
+history expiry without enlarging RM retention or admission. The latest112
+task-related tests pass. These are bounded observations, not exhaustive GPU
+peaks or memory-safeN: profiles remain ineligible, defaultp1 is unchanged,
+and G4.1/G4.2/G4.3 remain **partial**.
+
+Session closeout: explicit discovery now reaches p=32 with 128 waves/2,112
+requests verified offline, every decoder row at64, exact native correlation,
+zero drops and owned cleanup. Throughput candidates stay capped at16 and runtime
+defaults stay at1. All162 task-related tests pass. No resource limit was found;
+the observed ceiling remains ineligible for profile promotion. G4.1/G4.2/G4.3
+remain **partial**, with exhaustive capacity and production-readiness proof gaps.
+
+QueueScheduler-to-installed-CoEdIT candidate execution now passes offline as
+root and UID/GID 65534: accepted pre-dispatch SQLite reopening, exact verified
+durable publication, and real late delegate completion without cancelled
+publication. Forty-seven task-related tests pass. The existing real supervised
+SmolLM → CoEdIT → GECToR → SmolLM candidate also passes under UID/GID 65534.
+G1.1/G1.2/G2.1/G2.2/G4.1/G4.3 remain **partial**: profiles are unmeasured,
+GPU timing is explicitly incomplete, cancellation deliberately declines the
+advisory provider interruption, and process-crash recovery, HTTP deployment,
+distinct service users and production-image readiness are not established.
+
+The clean deployment foundation now stages 54 verified locked wheels, builds
+from the pinned CUDA runtime, and passes offline non-root bootstrap help/import
+and filesystem ownership smoke checks plus 14 focused unit tests. Serving is
+explicitly refused; separate-user supervision and OS package snapshot pinning
+remain missing. This supports G4.1/G4.3 without promoting either beyond **partial**.

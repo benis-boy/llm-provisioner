@@ -7,6 +7,17 @@ and makes no capacity, production-readiness, or model-maximum claim. The
 near-bucket fixture is validated by the child tokenizer with truncation
 disabled; failure is the safe result if it does not fit.
 
+The default `--native-batch-size 1` path is the legacy serialized scenario.
+Opt in to the bounded real p2 check with `--native-batch-size 2`: it uses the
+exact `coedit:p2:input128:output64:float16:beams1:nosample` bucket and submits
+two distinct one-text requests concurrently through the real ResourceManager.
+For both the small and near-bucket waves, success requires exactly one
+synchronized native batch-2 observation with both request identities, aligned
+nonempty individual responses, and zero lost observations. A serialized
+batch-1 response, malformed observation, or dropped observation fails the check;
+the cleanup path still runs. P2 remains explicitly `unmeasured` and is not a
+capacity measurement.
+
 The harness verifies the exact selected CoEdIT manifest/model digest, captures
 `LinuxGPUProof` for the parent before the worker is spawned, checks the exact
 worker PID residency, validates aligned nonempty output internally, stops the
@@ -42,8 +53,20 @@ docker run --rm --init --network none --pid=host --gpus '"device=GPU-d15a7ff9-a1
   --entrypoint /opt/venv/bin/python llm-compatibility-adapter:candidate \
   /opt/llm/coedit_adapter_check.py --models-root /opt/llm/models \
    --manifest /opt/llm/manifest.json \
+   --target-gpu-uuid GPU-d15a7ff9-a19b-3ece-7510-759a0bca1963 \
+   --host-pid-namespace
+```
+
+The exact focused GPU invocation (using the existing UUID, network isolation,
+and host PID namespace) is:
+
+```sh
+docker run --rm --init --network none --pid=host --gpus '"device=GPU-d15a7ff9-a19b-3ece-7510-759a0bca1963"' \
+  --entrypoint /opt/venv/bin/python llm-compatibility-adapter:candidate \
+  /opt/llm/coedit_adapter_check.py --models-root /opt/llm/models \
+  --manifest /opt/llm/manifest.json \
   --target-gpu-uuid GPU-d15a7ff9-a19b-3ece-7510-759a0bca1963 \
-  --host-pid-namespace
+  --host-pid-namespace --native-batch-size 2
 ```
 
 Use a separate run with `--inject-process-failure` for the bounded cleanup

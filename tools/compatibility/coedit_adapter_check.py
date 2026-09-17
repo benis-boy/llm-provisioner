@@ -38,10 +38,15 @@ ADAPTER = "candidate-coedit-provider"
 BUCKET = "coedit:p1:input128:output64:float16:beams1:nosample"
 
 
-def _profile(manifest_hash: str, model_hash: str, gpu: str) -> CapacityProfile:
+def _bucket(native_batch_size: int) -> str:
+    return f"coedit:p{native_batch_size}:input128:output64:float16:beams1:nosample"
+
+
+def _profile(manifest_hash: str, model_hash: str, gpu: str, native_batch_size: int = 1) -> CapacityProfile:
     return CapacityProfile(ModelId.COEDIT, gpu, manifest_hash, model_hash,
-        _runtime_identity(), ADAPTER, "unmeasured-coedit-adapter-check", 1, 1, 1, 0,
-        (SampleMetadata(1, 0, 0, 0, 0, ()),), bucket_identity=BUCKET)
+        _runtime_identity(), ADAPTER, "unmeasured-coedit-adapter-check", native_batch_size,
+        native_batch_size, native_batch_size, 0,
+        (SampleMetadata(native_batch_size, 0, 0, 0, 0, ()),), bucket_identity=_bucket(native_batch_size))
 
 
 def _runtime_identity() -> str:
@@ -119,11 +124,53 @@ def _check_response(event) -> bool:
             isinstance(value["texts"][0], str) and bool(value["texts"][0]))
 
 
+def _check_batch_observation(observations, drops: int, request_ids: tuple[str, ...], batch_size: int) -> bool:
+    """Accept only the evidence that proves this particular RM wave batched."""
+    if drops != 0 or len(observations) != 1:
+        return False
+    observation = observations[0]
+    required = {"batch_size", "execution_started", "execution_ended", "cuda_synchronized", "allocator", "request_ids"}
+    if not isinstance(observation, dict) or set(observation) != required:
+        return False
+    allocator = observation["allocator"]
+    allocator_keys = {"baseline_allocated", "baseline_reserved", "peak_allocated", "peak_reserved", "final_allocated", "final_reserved"}
+    values = ({key: allocator[key] for key in allocator_keys} if isinstance(allocator, dict)
+              else {key: getattr(allocator, key, None) for key in allocator_keys})
+    allocator_valid = ((isinstance(allocator, dict) and set(allocator) == allocator_keys) or type(allocator).__name__ == "AllocatorObservation") and all(
+        type(values[key]) is int and values[key] >= 0 for key in allocator_keys)
+    allocator_valid = allocator_valid and values["baseline_allocated"] <= values["baseline_reserved"]
+    allocator_valid = allocator_valid and values["peak_allocated"] <= values["peak_reserved"]
+    allocator_valid = allocator_valid and values["final_allocated"] <= values["final_reserved"]
+    allocator_valid = allocator_valid and values["peak_allocated"] >= values["baseline_allocated"]
+    allocator_valid = allocator_valid and values["peak_reserved"] >= values["baseline_reserved"]
+    return (observation["batch_size"] == batch_size
+            and observation["request_ids"] == request_ids
+            and observation["cuda_synchronized"] is True and allocator_valid)
+
+
+async def _wave(rm, session, requests: tuple[tuple[str, str], ...], bucket: str) -> list:
+    """Submit independent requests concurrently through the real RM boundary."""
+    await asyncio.gather(*(rm.submit(session.session_token, request_id, "attempt-1", _request(text),
+                                     idempotency_key="coedit-adapter-" + request_id,
+                                     bucket_identity=bucket)
+                           for request_id, text in requests))
+    events = []
+    for request_id, _ in requests:
+        events.append(await _events(rm, session, request_id, "attempt-1"))
+    return events
+
+
 async def run(args: argparse.Namespace) -> dict:
     if not args.host_pid_namespace:
         raise ValueError("--host-pid-namespace operator attestation is required")
     if not isinstance(args.target_gpu_uuid, str) or not UUID.fullmatch(args.target_gpu_uuid):
         raise ValueError("target GPU UUID is invalid")
+    native_batch_size = getattr(args, "native_batch_size", 1)
+    if type(native_batch_size) is not int or native_batch_size not in (1, 2):
+        raise ValueError("--native-batch-size must be 1 or 2")
+    if native_batch_size == 2 and args.inject_process_failure:
+        raise ValueError("--inject-process-failure cannot be combined with --native-batch-size 2")
+    bucket = _bucket(native_batch_size)
     source = args.models_root / "CoEdIT"
     if not source.is_dir():
         raise RuntimeError("selected CoEdIT artifact is missing")
@@ -148,10 +195,11 @@ async def run(args: argparse.Namespace) -> dict:
         gpu_proof = GPUProof(proof.identity, proof.cleanup, proof.residency,
                              expected_supervisor=proof.supervisor_identity)
         config = PythonProviderConfig(volume, document["manifest_sha256"], model_hash,
-            args.target_gpu_uuid, _runtime_identity(), ADAPTER, bucket_identity=BUCKET,
-            max_input_tokens=128, max_output_tokens=64, gpu_proof=gpu_proof)
+            args.target_gpu_uuid, _runtime_identity(), ADAPTER, bucket_identity=bucket,
+            max_native_batch_size=native_batch_size, max_input_tokens=128, max_output_tokens=64,
+            gpu_proof=gpu_proof)
         provider = CoEdITProvider(config)
-        profile = _profile(document["manifest_sha256"], model_hash, args.target_gpu_uuid)
+        profile = _profile(document["manifest_sha256"], model_hash, args.target_gpu_uuid, native_batch_size)
         # Loading can create a child before it reports failure, so retain the
         # temporary volume unless cleanup is subsequently positively proved.
         worker_may_exist = True
@@ -173,7 +221,7 @@ async def run(args: argparse.Namespace) -> dict:
                     return await self.wrapped.execute(request_id, payload)
             rm._provider = ProcessLossProvider(real_provider)  # noqa: SLF001
             await rm.submit(session.session_token, "failure", "attempt-1", _request("Short text."),
-                            idempotency_key="coedit-adapter-failure", bucket_identity=BUCKET)
+                            idempotency_key="coedit-adapter-failure", bucket_identity=bucket)
             await asyncio.wait_for(entered.wait(), 10)
             events = await _events(rm, session, "failure", "attempt-1")
             if not any(event.kind is EventKind.FAILURE for event in events):
@@ -197,20 +245,42 @@ async def run(args: argparse.Namespace) -> dict:
                     "runtime": _runtime_versions()}
 
         checks = {}
-        # The second fixture is deliberately near the configured bucket, not a
-        # claim about the model maximum; the child tokenizer is authoritative.
-        for request_id, text in (("small", "This sentence needs improvement."),
-                                 ("near-bucket", "word " * 100)):
-            await rm.submit(session.session_token, request_id, "attempt-1", _request(text),
-                            idempotency_key="coedit-adapter-" + request_id, bucket_identity=BUCKET)
-            events = await _events(rm, session, request_id, "attempt-1")
-            finished = next((event for event in events if event.session_token == session.session_token
-                              and event.generation == session.generation and event.request_id == request_id
-                             and event.attempt == "attempt-1"
-                             and event.kind is EventKind.RESPONSE_FINISHED), None)
-            checks[request_id] = finished is not None and _check_response(finished)
-            if not checks[request_id]:
-                raise RuntimeError("CoEdIT response was not nonempty and aligned")
+        waves = (("small", "This sentence needs improvement."), ("near-bucket", "word " * 100))
+        if native_batch_size == 2:
+            wave_results = []
+            for prefix, text in waves:
+                requests = ((prefix + "-a", text), (prefix + "-b", text + " now."))
+                event_sets = await _wave(rm, session, requests, bucket)
+                for (request_id, _), events in zip(requests, event_sets):
+                    finished = next((event for event in events if event.session_token == session.session_token
+                                      and event.generation == session.generation and event.request_id == request_id
+                                      and event.attempt == "attempt-1" and event.kind is EventKind.RESPONSE_FINISHED), None)
+                    checks[request_id] = finished is not None and _check_response(finished)
+                    if not checks[request_id]:
+                        raise RuntimeError("CoEdIT response was not nonempty and aligned")
+                observations = tuple(provider.drain_batch_observations())
+                drops = provider.batch_observation_drops()
+                ids = tuple(request_id for request_id, _ in requests)
+                if not _check_batch_observation(observations, drops, ids, 2):
+                    raise RuntimeError("independent RM requests did not produce one synchronized native batch2")
+                wave_results.append(observations[0])
+            batch_sizes = [item["batch_size"] for item in wave_results]
+            synchronized = all(item["cuda_synchronized"] is True for item in wave_results)
+        else:
+            # Legacy p1 mode intentionally retains the original serialized scenario.
+            for request_id, text in waves:
+                await rm.submit(session.session_token, request_id, "attempt-1", _request(text),
+                                idempotency_key="coedit-adapter-" + request_id, bucket_identity=bucket)
+                events = await _events(rm, session, request_id, "attempt-1")
+                finished = next((event for event in events if event.session_token == session.session_token
+                                  and event.generation == session.generation and event.request_id == request_id
+                                  and event.attempt == "attempt-1" and event.kind is EventKind.RESPONSE_FINISHED), None)
+                checks[request_id] = finished is not None and _check_response(finished)
+                if not checks[request_id]:
+                    raise RuntimeError("CoEdIT response was not nonempty and aligned")
+                if hasattr(provider, "drain_batch_observations"):
+                    provider.drain_batch_observations()
+            batch_sizes, synchronized = [1, 1], True
         residency = await proof.residency()
         if len(residency.runners) != 1 or provider.worker is None or provider.worker.child_identity not in residency.runners:
             raise RuntimeError("exactly one owned worker GPU resident was not proved")
@@ -221,7 +291,7 @@ async def run(args: argparse.Namespace) -> dict:
             raise RuntimeError("CoEdIT cleanup was not proved")
         try:
             await rm.submit(session.session_token, "stale", "attempt-1", _request("Short text."),
-                            idempotency_key="coedit-adapter-stale", bucket_identity=BUCKET)
+                            idempotency_key="coedit-adapter-stale", bucket_identity=bucket)
         except ResourceManagerError as exc:
             if exc.failure.code != "scheduler_superseded":
                 raise
@@ -229,7 +299,9 @@ async def run(args: argparse.Namespace) -> dict:
             raise RuntimeError("stale session token was accepted")
         keep = False
         return {"status": "passed-candidate", "model": "CoEdIT", "profile": "unmeasured",
-                 "bucket": BUCKET, "small": checks["small"], "near_bucket": checks["near-bucket"],
+                 "bucket": bucket, "native_batch_size": native_batch_size, "batch_sizes": batch_sizes,
+                 "request_count": len(checks), "synchronized": synchronized,
+                 "small": checks.get("small", True), "near_bucket": checks.get("near-bucket", True),
                  "gpu_uuid": args.target_gpu_uuid, "runner_count": 1, "cleanup": True,
                  "stale_rejected": True, "manifest_sha256": document["manifest_sha256"],
                  "model_sha256": model_hash, "runtime": _runtime_versions()}
@@ -266,6 +338,7 @@ def main() -> int:
     parser.add_argument("--target-gpu-uuid", required=True)
     parser.add_argument("--host-pid-namespace", action="store_true")
     parser.add_argument("--inject-process-failure", action="store_true")
+    parser.add_argument("--native-batch-size", type=int, choices=(1, 2), default=1)
     args = parser.parse_args()
     result = asyncio.run(asyncio.wait_for(run(args), 360))
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))

@@ -549,3 +549,186 @@ Memory points include foreign allocations, are not sampled execution peaks, and
 do not prove per-request incremental VRAM, a safety reserve, memory-safe `N` or
 optimal parallelism. No measured profile was produced. No full discovery was
 run. G4.1/G4.2/G4.3 remain **partial**.
+
+### CoEdIT bounded native-batch capacity candidate (2026-09-17)
+
+G4.1/G4.2/G4.3 remain **partial**. The latest independent **unit** command,
+`.venv/bin/python -W error -m unittest -v tests.unit.test_python_worker
+tests.unit.test_coedit_batch tests.unit.test_capacity_measurement
+tests.unit.test_coedit_capacity_check tests.unit.test_coedit_adapter_check
+tests.unit.test_coedit_provider tests.unit.test_coedit_benchmark_witness
+tests.unit.test_gpu_memory tests.unit.test_python_process
+tests.unit.test_gector_worker`, passed **101 tests in 3.816 seconds**.
+The offline network-disabled adapter build passed with image manifest
+`sha256:dc7a0903f0b86734f373316537766b18262fee90cc554dd44a431066b7612f9d`.
+
+The latest actual **e2e candidate** p=16 run failed closed in warmup with
+`native_batch_correlation` after a native 14+2 split; its minimum sampled
+whole-device free memory was 7,125,778,432 bytes of 12,878,610,432 (not a
+between-sample guarantee). Four
+waves were measured at each of p=1,2,4,5,7,8,10,12,13,15. This is scheduling /
+batch-correlation failure evidence, not a memory-bound result or proof of
+useful native concurrency. The owned container was removed and verified absent;
+foreign GPU work was untouched. No profile was written or approved, and the
+runtime/default remains p=1. The remaining design boundary must preserve
+admission/direct-input safety and the 5 ms bucket contract; it must not use a
+benchmark barrier or private execution bypass.
+
+The tester owned `llm-coedit-capacity-p16-diag-v2`, extracted only a bounded
+numeric projection of its diagnostic artifact, removed the container and
+verified exact-name absence. Earlier p=2 candidate execution passed with the
+exact 128-token witness, synchronized Torch allocator and fenced NVML evidence,
+candidate optimum 2, profile ineligibility and owned cleanup. Reproducible
+invocation and evidence schema: [CoEdIT capacity check](../../../../docs/coedit-capacity-check.md).
+These experiments do not prove a memory-safe bound, worst-case decoder workload,
+approved profiles or production readiness. No full discovery was run.
+
+The remaining validation-arrival implementation now performs CoEdIT admission's
+bounded envelope and exact bucket checks locally instead of issuing one
+serialized child tokenizer RPC per request. The child still validates every
+native-batch item before allocator measurement or model execution. Its exact
+`request_validation_failed` response is recoverable only for `execute_batch`;
+the same response for another operation and all uncertain worker/protocol errors
+remain fatal. Focused tests cover concurrent local admission, exact execution
+rechecks, mixed-batch pre-execution rejection, worker reuse, non-execute fatal
+classification, and ResourceManager slot release/reuse after child rejection.
+The final command was `.venv/bin/python -W error -m unittest -v
+tests.unit.test_python_worker tests.unit.test_coedit_batch
+tests.unit.test_capacity_measurement tests.unit.test_coedit_capacity_check
+tests.unit.test_coedit_adapter_check tests.unit.test_coedit_provider
+tests.unit.test_coedit_benchmark_witness tests.unit.test_resource_manager
+tests.unit.test_python_process`: **122 tests passed in 4.255 seconds** with no
+warnings. Compilation and `git diff --check` passed. No GPU/Docker rerun was
+performed, so this is unit evidence only: the 14+2 observation remains current,
+no p=16 success or memory-safe bound is proved, no profile is approved, default
+admission remains p=1, and G4.1/G4.2/G4.3 remain **partial**.
+
+Final diagnostic-guard verification used the same focused command: **106 tests
+passed in 3.828 seconds**. Derived failure categories now remain on the retained
+failed wave, and changed GPU total-memory evidence stops before the next wave.
+That run exposed an unawaited coroutine in a CLI test's mocked async runner;
+the tester corrected the fixture to close its intercepted coroutine. The exact
+worker cancellation test plus `tests.unit.test_capacity_measurement` and
+`tests.unit.test_coedit_capacity_check` then passed **33 tests in 1.069 seconds**
+without unraisable/coroutine warnings. `git diff --check` passed. These final
+failure-path guards were not followed by another GPU run; the image evidence
+above precedes them.
+
+### CoEdIT decoder coverage and incremental discovery continuation
+
+G4.1/G4.2/G4.3 **unit** evidence: decoder-start/EOS/PAD handling, strict
+configured maximum binding through native IPC, generic output128 support,
+short-output noncoverage, complete aggregate schedules, exact sequential
+four-repeat discovery, identity/native/allocator/telemetry/reserve failures,
+failed-wave retention, and bounded sanitized output. A real default-RM
+544-request regression verifies terminal cursors survive event-history eviction.
+Tests own synthetic providers, temporary artifacts and their RM/task cleanup.
+
+Command: `.venv/bin/python -W error -m unittest -v
+tests.unit.test_capacity_measurement tests.unit.test_coedit_capacity_check
+tests.unit.test_coedit_benchmark_witness tests.unit.test_coedit_batch
+tests.unit.test_python_worker tests.unit.test_coedit_provider
+tests.unit.test_python_process` — **112 passed in4.285s**. Focused compilation
+and `git diff --check` passed. No unrelated/full discovery was run.
+
+G4.1/G4.2/G4.3 **e2e candidate**: offline rebuilt p16 throughput passed all59
+waves with exact128input/64decoder-step witnesses and cleanup. Subsequently,
+`--discover-memory` passed64 waves/544 requests: four serial baselines and four
+repeats at every p2..16, exact native correlation and no observation drops.
+Minimum sampled free memory was8,192,479,232 of12,878,610,432 bytes. Watchers
+resume after each completed wave; an initial zero-cursor history-expiry failure
+was not a memory limit. Latest image manifest:
+`sha256:118f447d79d88207a2fb3e2be28d146c1cd504abd4e064caad469d76cfbcfd6d`.
+The tester removed its `llm-coedit-memory-discovery-v2` container and verified
+absence; foreign workloads were untouched. Artifact schema, digest and command:
+[CoEdIT capacity check](../../../../docs/coedit-capacity-check.md).
+
+Full workload observation does not establish exhaustive peak memory, a
+resource-limitedN or approved profiles. `memory_safe_n:null`,
+`profile_eligible:false`; all touched goals remain **partial**.
+
+### Final bounded p=32 discovery closeout
+
+G4.1/G4.2/G4.3 **unit**: config/batcher32 acceptance and33 rejection, default1,
+actual32-row result alignment/correlation, mode-aware early CLI rejection,
+128-wave/2,112-request discovery schedule, full-schema256KiB artifact bounds
+and atomic failure cleanup, discovery/throughput terminal exit statuses.
+Testers own fake providers, temporary artifacts, RM tasks and cleanup.
+
+Command: `.venv/bin/python -W error -m unittest -v tests.unit.test_capacity_measurement tests.unit.test_coedit_capacity_check tests.unit.test_coedit_benchmark_witness tests.unit.test_coedit_batch tests.unit.test_python_worker tests.unit.test_coedit_provider tests.unit.test_python_process tests.unit.test_resource_manager tests.unit.test_coedit_adapter_check tests.unit.test_gector_worker`
+— **162 passed in9.86s**; focused compilation and whitespace checks passed.
+No unrelated/full discovery was run.
+
+G4.1/G4.2/G4.3 **e2e candidate**: rebuilt offline discovery passed every p1..32
+with four repeats,128 waves/2,112 requests in212.659s, exit0. Input128 and every
+decoder row64 verified; exact native correlation and zero drops throughout.
+Minimum sampled free memory was7,862,497,280 bytes with stable total readings.
+The full sanitized artifact was127,166 bytes, below the unchanged256KiB cap.
+The tester removed its `llm-coedit-memory-discovery-p32-final` container and
+verified absence; foreign workloads were untouched. Reproducible command,
+image and reduced artifact identity:
+[CoEdIT capacity check](../../../../docs/coedit-capacity-check.md#session-closeout-discovery-through-p32).
+
+Result: `observed_through_ceiling`, `observed_safe_through:32`,
+`memory_safe_n:null`, `profile_eligible:false`. No resource bound was found;
+exhaustive peaks, approved capacity and production readiness remain unproved.
+All touched goals remain **partial**.
+
+## QueueScheduler-to-CoEdIT and non-root candidate continuation
+
+G1.1/G1.2/G2.1/G2.2/G4.1/G4.3 **unit**:
+`tests.unit.test_scheduler_adapter_check` exercises the actual harness with real
+QueueScheduler/SQLite/LocalPublisher/ResourceManager and contract-faithful external
+doubles. It covers exact receipt/result correspondence, malformed normal/late
+responses, selected-file identity across actual tiny SPECS provisioning, terminal
+watching past cancellation, and dependent cleanup ordering/timeout retention.
+Tests own temporary artifacts, stores, tasks and fake provider/proof resources.
+
+Command: `.venv/bin/python -W error -m unittest -v tests.unit.test_scheduler_adapter_check tests.unit.test_scheduler tests.unit.test_store tests.unit.test_results`
+— **47 passed in 3.842s**. Compilation and `git diff --check` passed; no full
+discovery was run.
+
+**e2e candidate**, not qualifying production proof: fresh offline image
+`sha256:9ce2cfbe09fce26d955e5cf1ee9841beaa7907a4b672b93749197ee25d59ee55`
+passed the scheduler/installed-CoEdIT check as root and `65534:65534` on
+`GPU-d15a7ff9-a19b-3ece-7510-759a0bca1963`. Both proved pre-dispatch accepted
+SQLite reopen, normal `done` with one exact publication receipt, cancelled late
+delegate completion without a handoff/additional receipt, and owned cleanup.
+`gpu_ms:null`, `gpu_timing_complete:false`, `profile:unmeasured`,
+`profile_eligible:false` remained explicit. Test-owned containers
+`llm-scheduler-adapter-check` and `llm-scheduler-adapter-check-nonroot` were removed
+and verified absent. The wrapper intentionally declines advisory cancellation
+while its gate is held; this is result fencing, not provider interruption proof.
+Commands and diagnostic schema: [scheduler check](../../../../docs/scheduler-adapter-gpu-check.md).
+
+The same image also passed existing installed supervised three-model switching
+as UID/GID 65534: four responses, three switches, cancellation/stale fencing,
+six bounded memory observations and final owned cleanup. Its test-owned
+`llm-three-model-adapter-check-nonroot` container was verified absent. This proves
+the existing same-UID topology can run non-root, not the distinct `llm`/`ollama`
+deployment contract. All touched goals remain **partial**; process-crash/in-flight
+recovery, HTTP deployment, measured profiles and production readiness remain gaps.
+
+## Deployment foundation closeout (2026-09-17)
+
+G4.1/G4.3 **unit**: `.venv/bin/python -W error -m unittest -v tests.unit.test_deployment_inputs tests.unit.test_deployment_image`
+— **14 passed in 0.012s**. Tests own temporary ZIP wheels, locks, archives,
+staging directories and shell subprocesses. Coverage includes canonical wheel
+identity, top-level versus vendored metadata, copied-byte verification, rollback,
+path safety, Docker policy and fail-closed serve refusal. Targeted compilation
+and `git diff --check` passed.
+
+**e2e candidate / packaging smoke only**: actual retained inputs yielded 54
+locked wheels and 57 staged files; the clean foundation Docker build passed in
+185.0s with image ID
+`sha256:11216cfed17487c5ff12a20fe5ee815dd158d389236bcd50c78b51b6e9b87c25`.
+Offline help exited 0, unsupported serve exited 78, and non-root bootstrap import
+plus ownership/checked-path hygiene passed. Test-owned containers
+`llm-provider-foundation-help`, `llm-provider-foundation-serve`, and
+`llm-provider-foundation-import` were all verified absent. Generated staging is
+retained as gitignored build input; no models or source JSON were copied.
+
+Commands and boundaries: [foundation](../../../../docs/production-image-foundation.md).
+This is not provider/GPU serving or qualifying deployment E2E. OS packages still
+come from live apt repositories, and distinct-user supervision remains absent.
+G4.1/G4.3 and parent G0 remain **partial**.

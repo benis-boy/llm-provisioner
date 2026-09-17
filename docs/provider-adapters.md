@@ -5,14 +5,30 @@
 CoEdIT uses one fresh, process-group-owned offline Python worker per load. The
 parent imports no Torch/CUDA and requires a captured Linux GPU proof for the
 parent supervisor before the child is launched. The strict request is
-`{"instruction": string, "texts": [string]}` with one configured native batch
-item, and the aligned result is `{"texts": [string]}`. Tokenization enables
-special tokens and disables truncation before admission. The child uses local
+`{"instruction": string, "texts": [string]}` and the aligned result is
+`{"texts": [string]}`. The default bucket remains native batch one. An explicit
+`max_native_batch_size` opt-in (maximum 32) uses an exact batch-bound bucket and
+the fixed 5 ms collection delay. The capacity tool limits throughput candidates
+to 16 and permits discovery ceilings of 2–32 only with `--discover-memory`.
+Neither mode approves a profile; runtime defaults remain batch one. Candidate
+waves retain one exact configured bucket and bounded `p+p` admission.
+Concurrent calls coalesce into one child `execute_batch` RPC. Admission
+performs bounded envelope and bucket checks without a serialized child RPC;
+immediately before native execution, the child validates every item without
+truncation and retains request order. An expected child request-validation
+rejection fails the whole native batch before model execution and is recoverable
+only for `execute_batch`; uncertain worker errors still fail the worker closed.
+Tokenization enables special tokens and disables truncation. The child uses local
 Transformers, explicit safetensors, no remote code, configured dtype and
 generation parameters, and `cuda:0`. Framed RPC, stderr, EOF, malformed
 frames, timeouts, child death, PID reuse, and uncertain process-group cleanup
-fail closed. Only serial execution is supported; no measured capacity is
-claimed.
+fail closed. The child returns private bounded batch cardinality and monotonic
+execution timing evidence, accepted only when CUDA synchronization is confirmed;
+this is an observation for future measurement, not a capacity claim. The retained
+observation window is bounded by the configured native batch size and its explicit
+drop count makes eviction observable. Execution RPC serialization, ownership
+fencing, and cleanup remain unchanged. The batching window remains the ordinary
+fixed 5 ms collection policy; admission does not introduce a wave barrier.
 
 The Phase 4 SmolLM adapter is intentionally a client of the fixed supervisor-owned
 loopback Ollama daemon. It never starts Ollama, downloads a model, benchmarks, or
@@ -78,3 +94,8 @@ artifact or Transformers generation defaults while separately requiring the
 DeBERTa architecture's 512 positions. Execution checks the aligned output again. The response
 is `{"texts":[non-empty string]}`. No measured capacity is claimed; RM
 admission is bounded at p=1 with one buffered request.
+CoEdIT native batch observations include a typed allocator witness with
+baseline/peak/final allocated and reserved bytes.  Adapter and capacity
+checks must preserve and validate this record, rather than treating a
+successful response as memory evidence.  Whole-device NVML sampling remains
+the authoritative reserve/foreign-allocation guard.

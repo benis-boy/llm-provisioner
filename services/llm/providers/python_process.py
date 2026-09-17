@@ -16,6 +16,10 @@ from .config import GPUProof
 from .gpu import ProcessIdentity
 
 
+class WorkerRequestValidationError(ValueError):
+    """A rejected immutable request, not evidence that the worker is unsafe."""
+
+
 class PythonWorker:
     def __init__(self, root: Path, config: dict, *, timeout: float = 120.0,
                  frame_limit: int = 256 * 1024, command=None, gpu_proof: GPUProof | None = None,
@@ -147,6 +151,8 @@ class PythonWorker:
             if p is None or p.returncode is not None: await self.close(); raise RuntimeError("model worker is dead")
             self._assert_leader()
             self._serial += 1
+            if self._serial > 2 ** 63 - 1:
+                raise RuntimeError("worker RPC ID space exhausted")
             ident = self._serial
             body = json.dumps({"id": ident, "op": operation, **values}, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode()
             if len(body) > self.frame_limit: raise ValueError("RPC request exceeds bound")
@@ -165,7 +171,16 @@ class PythonWorker:
                 self._failed = RuntimeError("malformed worker response")
                 await self.close()
                 raise self._failed
-            if response.get("ok") is False and set(response)=={"id","ok","error"} and response["error"] in {"worker_operation_failed","gpu_mig_api_unavailable","gpu_mig_api_failed","gpu_identity_mismatch"}:
+            if (operation == "execute_batch" and response.get("ok") is False
+                    and set(response)=={"id","ok","error"}
+                    and response["error"] == "request_validation_failed"):
+                # The child completed the framed RPC and identified a
+                # request-local no-truncation/shape rejection.  It did not
+                # lose transport or model state, so this one error is
+                # recoverable; every other uncertain worker failure remains
+                # fatal below.
+                raise WorkerRequestValidationError("worker rejected request validation")
+            if response.get("ok") is False and set(response)=={"id","ok","error"} and response["error"] in {"worker_operation_failed","request_validation_failed","insufficient_max_input","benchmark_tokenization_failed","benchmark_input_over_bound","gpu_mig_api_unavailable","gpu_mig_api_failed","gpu_identity_mismatch"}:
                 self._failed=RuntimeError("worker operation failed: "+response["error"])
                 await self.close()
                 raise self._failed

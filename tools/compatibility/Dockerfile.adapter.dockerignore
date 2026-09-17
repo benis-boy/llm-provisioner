@@ -5,8 +5,10 @@
 !tools/compatibility/
 !tools/compatibility/adapter_check.py
 !tools/compatibility/coedit_adapter_check.py
+!tools/compatibility/coedit_capacity_check.py
 !tools/compatibility/gector_adapter_check.py
 !tools/compatibility/three_model_adapter_check.py
+!tools/compatibility/scheduler_adapter_check.py
 !.compatibility/
 !.compatibility/adapter-deps/
 !.compatibility/adapter-deps/wheelhouse/

@@ -10,6 +10,8 @@ from .gpu import ProcessIdentity
 
 @dataclass(frozen=True)
 class PythonProviderConfig:
+    NATIVE_BATCH_DELAY_SECONDS = 0.005
+    MAX_NATIVE_BATCH_SIZE = 32
     artifact_root: Path
     manifest_sha256: str
     model_sha256: str
@@ -17,6 +19,8 @@ class PythonProviderConfig:
     runtime_identity: str
     adapter_identity: str
     bucket_identity: str = "coedit:p1:input128:output64:float16:beams1:nosample"
+    max_native_batch_size: int = 1
+    native_batch_delay_seconds: float = NATIVE_BATCH_DELAY_SECONDS
     max_input_tokens: int = 128
     max_output_tokens: int = 64
     dtype: str = "float16"
@@ -42,11 +46,18 @@ class PythonProviderConfig:
                 or set(parameters) != {"num_beams", "do_sample"}
                 or type(parameters["num_beams"]) is not int or parameters["num_beams"] < 1
                 or type(parameters["do_sample"]) is not bool or parameters["do_sample"] is not False):
-            raise ValueError("CoEdIT generation must be deterministic native batch-one generation")
-        expected_bucket = (f"coedit:p1:input{self.max_input_tokens}:output{self.max_output_tokens}:"
+            raise ValueError("CoEdIT generation must be deterministic")
+        if type(self.max_native_batch_size) is not int or not 1 <= self.max_native_batch_size <= self.MAX_NATIVE_BATCH_SIZE:
+            raise ValueError(f"native batch size must be between 1 and {self.MAX_NATIVE_BATCH_SIZE}")
+        if (not isinstance(self.native_batch_delay_seconds, (int, float)) or isinstance(self.native_batch_delay_seconds, bool)
+                or not math.isfinite(self.native_batch_delay_seconds) or not 0 <= self.native_batch_delay_seconds <= 1):
+            raise ValueError("native batch delay must be between zero and one second")
+        if self.native_batch_delay_seconds != self.NATIVE_BATCH_DELAY_SECONDS:
+            raise ValueError("native batch delay is fixed by the CoEdIT batch identity")
+        expected_bucket = (f"coedit:p{self.max_native_batch_size}:input{self.max_input_tokens}:output{self.max_output_tokens}:"
                            f"{self.dtype}:beams{parameters['num_beams']}:nosample")
         if self.bucket_identity != expected_bucket:
-            raise ValueError("bucket identity must bind CoEdIT shape, dtype, and generation")
+            raise ValueError("bucket identity must bind CoEdIT shape, dtype, generation, and native batch")
         if not isinstance(self.request_timeout_seconds, (int, float)) or isinstance(self.request_timeout_seconds, bool) or not math.isfinite(self.request_timeout_seconds) or self.request_timeout_seconds <= 0:
             raise ValueError("request timeout must be positive")
         if type(self.rpc_frame_limit) is not int or not 1024 <= self.rpc_frame_limit <= 256 * 1024:

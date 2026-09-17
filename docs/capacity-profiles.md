@@ -63,6 +63,13 @@ cryptographic proof; SQLite cannot prove that a claimed GPU, runtime, or
 measurement actually occurred. This precursor therefore does not claim
 measured capacity or actual-GPU readiness.
 
+The offline CoEdIT candidate slice is documented in
+`coedit-capacity-check.md`. It never promotes its bounded probe to a measured
+profile: exact 128-token input and 64-step decoder witnesses now have real
+candidate evidence, but exhaustive peak/resource-bound proof remains absent,
+so no runtime profile is saved. Incremental discovery reports only historical
+`observed_safe_through`, never an approved `memory_safe_n`.
+
 Profiles require `p <= N`, `buffer_capacity == p`, and a 20% reserve. SmolLM
 requires positive context and no bucket. Other models require a bucket and no
 context. Missing rows, malformed schema/data, identity mismatch, or incompatible

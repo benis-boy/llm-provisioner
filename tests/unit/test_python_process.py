@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from services.llm.providers.config import GPUProof
 from services.llm.providers.gpu import ProcessIdentity
-from services.llm.providers.python_process import PythonWorker
+from services.llm.providers.python_process import PythonWorker, WorkerRequestValidationError
 
 
 def proof(clean=True):
@@ -52,6 +52,31 @@ h=sys.stdin.buffer.read(4);q=json.loads(sys.stdin.buffer.read(struct.unpack(">I"
         worker=self.worker(script)
         await worker.start()
         with self.assertRaisesRegex(RuntimeError,"gpu_mig_api_unavailable"): await worker.call("gpu_identity")
+
+    async def test_execute_batch_validation_error_is_recoverable(self):
+        script = '''import json,struct,sys
+for _ in range(2):
+ h=sys.stdin.buffer.read(4);q=json.loads(sys.stdin.buffer.read(struct.unpack(">I",h)[0]))
+ value={"id":q["id"],"ok":False,"error":"request_validation_failed"} if q["op"]=="execute_batch" else {"id":q["id"],"ok":True,"value":"ok"}
+ b=json.dumps(value).encode();sys.stdout.buffer.write(struct.pack(">I",len(b))+b);sys.stdout.buffer.flush()'''
+        worker = self.worker(script)
+        await worker.start()
+        with self.assertRaises(WorkerRequestValidationError):
+            await worker.call("execute_batch", items=[])
+        self.assertIsNotNone(worker.process)
+        self.assertEqual(await worker.call("load"), "ok")
+        await worker.close()
+
+    async def test_request_validation_error_on_non_execute_operation_is_fatal(self):
+        script = '''import json,struct,sys
+h=sys.stdin.buffer.read(4);q=json.loads(sys.stdin.buffer.read(struct.unpack(">I",h)[0]))
+b=json.dumps({"id":q["id"],"ok":False,"error":"request_validation_failed"}).encode()
+sys.stdout.buffer.write(struct.pack(">I",len(b))+b);sys.stdout.buffer.flush()'''
+        worker = self.worker(script)
+        await worker.start()
+        with self.assertRaisesRegex(RuntimeError, "worker operation failed"):
+            await worker.call("load")
+        self.assertIsNone(worker.process)
 
     async def test_cleanup_failure_retains_ownership_fences(self):
         worker = PythonWorker(Path("/tmp"), {}, timeout=.25, frame_limit=1024, gpu_proof=proof(False),

@@ -7,8 +7,10 @@ WORKDIR /opt/llm
 COPY services/ /opt/llm/services/
 COPY tools/compatibility/adapter_check.py /opt/llm/adapter_check.py
 COPY tools/compatibility/coedit_adapter_check.py /opt/llm/coedit_adapter_check.py
+COPY tools/compatibility/coedit_capacity_check.py /opt/llm/coedit_capacity_check.py
 COPY tools/compatibility/gector_adapter_check.py /opt/llm/gector_adapter_check.py
 COPY tools/compatibility/three_model_adapter_check.py /opt/llm/three_model_adapter_check.py
+COPY tools/compatibility/scheduler_adapter_check.py /opt/llm/scheduler_adapter_check.py
 COPY .compatibility/adapter-deps/wheelhouse/ /opt/llm/adapter-wheelhouse/
 COPY .compatibility/adapter-deps/requirements.lock /opt/llm/adapter-requirements.lock
 RUN /opt/venv/bin/python -m pip install --no-index --no-cache-dir --require-hashes \

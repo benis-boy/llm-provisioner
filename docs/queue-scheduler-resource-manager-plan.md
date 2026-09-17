@@ -19,62 +19,28 @@ now have candidate offline GPU evidence, including ResourceManager-mediated
 switching; that is not production deployment or measured capacity proof.
 Authoritative lifecycle-health wiring and strict offline configuration/artifact/
 measured-profile binding preflight now have local regression evidence. They still
-require runtime composition and actual external dependency proofs. A private
+require production deployment and actual external dependency proofs. A private
 Ollama supervisor now has focused local process-lifecycle evidence, not a
 supervised deployment proof.
 Unchecked work remains target-state design. Historical
 capacity notes are not implementation evidence.
 
-### Implementation progress (2026-09-17)
+### Current/open status and evidence ledger (2026-09-17)
 
 Work is tracked in logical slices, not whole-phase completion claims. See
 [implementation decisions](implementation-decisions.md) and
 [queue-core boundaries](queue-core.md).
 
-Latest bounded slices: [authoritative lifecycle health](resource-manager-health.md)
-and [offline binding preflight](offline-bootstrap.md). The latter verifies selected
-artifact/runtime/GPU identities against read-only measured profiles before making
-unloaded provider bindings; it does not start a production service. Full discovery
-passes **427 tests in 50.677s**, with compilation and whitespace checks passing.
-Synthetic profile fixtures and loopback/fake-provider tests remain unit evidence.
-The next bounded supervisor slice adds `OwnedOllama` with a pre-exec identity
-gate, Linux pidfd-targeted signals, loopback listener ownership checks, bounded
-version responses, and cancellation-safe cleanup. The focused supervisor,
-bindings, Python-process, GPU-proof and SmolLM suites pass **98 tests**
-with warnings treated as errors. This is local fake-daemon evidence,
-not a real Ollama topology or deployment proof. Previously observed descendants
-remain tracked if they change process group/session. Arbitrary children that
-escape before observation require external containment; this module must not be
-treated as a cgroup or container owner.
+The bounded implementation and local-verification record is maintained in the
+[partial-completed evidence ledger](queue-scheduler-resource-manager-plan-partial_completed.md).
+It contains no completed phases or goals: G0 and G1–G4 remain `partial`, and
+no qualifying production-boundary E2E exists.
 
-The composed runtime now captures GPU ownership before children, supervises the
-private daemon, serves RM and health together, rechecks live dependencies, and
-permanently fences admission/session results before bounded shutdown. Idle is
-unready without preventing a valid session start. Current artifact selection,
-exact profiles/runtime, SQLite WAL/free space, daemon ownership/version and
-active provider readiness gate work. **141 focused tests passed in 32.034s**;
-compilation and whitespace checks passed. Only task-related suites are run from
-this point forward; historical full-discovery counts below are not commands to rerun.
-
-The actual offline installed-adapter switching candidate also passed using
-`OwnedOllama`: four responses, three cleanup-gated replacements, stale controls
-rejected, cancelled output fenced, final owned daemon/provider/GPU cleanup, and
-the named container verified absent. Image:
-`sha256:ec0af2cb045557602d42eb94c6645b3e330afa220d489bd34bc86bffb54ce108`.
-Its **29-test** focused harness/supervisor/shutdown check passed separately.
-Profiles remain explicitly unmeasured. This proves the real supervisor topology
-for that candidate, not composed-server GPU readiness, capacity, or production
-deployment. Next boundaries are trustworthy memory/measurement instrumentation,
-real concurrent/native-batch execution evidence, and production packaging.
-
-- [x] **Slice A — Contract foundation:** OpenAPI draft, typed request/attempt,
-  function, provisioning-bucket and profile contracts; status adjacency table;
-  decision owners and operational blockers recorded.
 - [ ] **Phase 0 exit:** fully validate OpenAPI and client/server bindings; finish
   profile runtime integration after compatibility review. Durable profile SQLite
   storage and strict selected-artifact manifests now exist as precursor slices.
   Parsed OpenAPI validation and RM/scheduler loopback binding tests now pass;
-   future capacity-measurement and health operations retain
+  future capacity-measurement and health operations retain
   their full target contracts.
 - [ ] **Phase 1 — Compatibility spike and production image:** Docker/NVIDIA and
   candidate three-model offline small and configured upper-fixture inference,
@@ -82,27 +48,9 @@ real concurrent/native-batch execution evidence, and production packaging.
   artifacts. Full compatibility exit and production runtime
   remain unproved; candidate pins are not approved production pins. See
   [environment evidence](implementation-decisions.md#environment-reassessment-2026-09-16).
-- [x] **Slice B — Durable queue primitives:** SQLite WAL transactions, exact
-  enqueue idempotency, immutable intent references, separate ordered positions,
-  attempts, leases, handoffs, cancellation/submission outbox and event cursors.
-- [x] **Slice C — Ordering and local recovery:** dependency-gated claims,
-  iterative cycle validation, transactional append/grouped skip-line insertion,
-  lease/session recovery, stale-owner fencing, retry persistence and abort-all
-  primitives; subprocess abrupt-exit and independent-connection tests.
-- [x] **Slice D — Durable local results:** fsynced content-addressed files,
-  verified idempotent local publication receipts, pending handoff replay, and
-  acknowledged-only `done` transitions.
-- [x] **Slice E — Durable optional-function intent:** canonical ready/template
-  descriptors, dependency-reference validation, mutation-safe enqueue snapshots,
-  descriptor-sensitive idempotency and additive legacy database upgrades.
-  Direct claims of descriptor-bearing work fail closed without dispatch side
-  effects. Function execution and polling are not implemented by this slice.
 - [ ] **Phase 2 exit:** integrate real ResourceManager session reconciliation
   and outbox delivery; finish operation-replay and guarded-transition behavioral
   coverage.
-- [x] **Slice F — Evaluated eligibility:** bounded FIFO scans, sync/async
-  ready/template execution, dependency result resolution and single-use durable
-  version/session/intent-fenced claim capabilities.
 - [ ] **Phase 3 — Async QueueScheduler:** coordinator, dispatch replay, watch,
   completion watchdog, cancellation and crash publication recovery implemented
   locally. Review-driven race fixes passed local verification; production-boundary
@@ -111,186 +59,30 @@ real concurrent/native-batch execution evidence, and production packaging.
   lifecycle, exclusive residency fences, p+p admission, bounded cleanup and event
   replay implemented. Real experimental RM-driven lifecycle harness passed;
    RM HTTP binding has local loopback proof; full production adapter integration remains open.
-- [x] **RM transport slice:** typed HTTP client, server-owned profile/provider
-  lookup, trusted shared content references, bounded JSON/SSE, request-level
-  cancellation, typed non-failure backpressure and cursor replay/expiry.
-  Scheduler-over-HTTP exact publication and all three model selector shapes
-  pass with fake providers. See [HTTP boundary](resource-manager-http.md).
 - [ ] **Phase 4 — ResourceManager and real adapters.**
-- [x] **CoEdIT isolated-adapter slice:** child-only CUDA/Transformers loading,
-  exact selected artifacts, full instruction/text token checks, deterministic
-  native batch-one execution, strict bounded RPC and identity-fenced process
-  cleanup. The actual adapter passed offline small/near-bucket inference,
-  positive worker residency, stale-session rejection and injected process-loss
-  cleanup. Its p=1 profile is explicitly unmeasured; full switching and
-  production packaging remain open. See [CoEdIT GPU check](coedit-adapter-gpu-check.md).
-- [x] **SmolLM adapter slice:** existing supervisor-owned loopback Ollama client,
-   selected manifest/GGUF identity, bounded local import and raw ASCII framing,
-   configured parallelism, typed supervisor/runner readiness, and verified cleanup.
-   Failed initial RM lifecycle now cleans up before permitting another start;
-   unproved cleanup remains fenced. This is not production packaging or measured capacity.
-- [x] **Linux GPU ownership proof slice:** lazy NVML access, empty compute/graphics
-   baseline, exact physical GPU, positive bounded procfs ancestry and PID-reuse checks,
-   and cleanup absence. Real capture requires explicit host-PID-namespace
-   attestation; deployment must supply authoritative procfs and supervisor identity.
-   Current evidence uses synthetic NVML/procfs, not real GPU execution.
-- [x] **Scheduler transport and control replay slice:** application-configured
-  scheduler/function registries, six HTTP operations, durable keyed start/cancel/stop,
-  strict bounded JSON and immutable request-specific SSE history. Live replay uses
-  bounded batches without starvation from unrelated events; terminal reconnects
-  close and unavailable legacy history fails before headers. Publication retains
-  its cancellation/session fence for both shared and separate receipt databases.
-  These are local fake-provider tests, not production restart or GPU proof.
-  See [scheduler HTTP boundary](scheduler-http.md).
 - [ ] **Phase 5 — Offline provisioner and measured capacity profiles.**
-- [x] **Artifact-volume slice:** serialized, selected-file-only offline copying,
-  source-independent content identities, verified digest reuse and atomic `current`
-  selection. Corruption, unsafe paths and interrupted copying fail closed; prior
-  complete volumes are retained. See [artifact-volume boundary](artifact-volume.md).
-- [x] **Read-only artifact verification HTTP slice:** configured volume IDs,
-  strict bounded JSON, exact selected-file/hash verification and minimal identity
-  summaries. Hashing runs off the event loop with bounded concurrency; timeout
-  and disconnect retain worker slots until hashing exits. No copying, download,
-  model loading, readiness or measured-capacity claim is made by this endpoint.
-- [x] **Profile registry precursor:** SQLite WAL/FULL immutable records, draft
-  exclusion, exact identity/closest context lookup, evidence hashes and strict
-  schema checks. Supplied successful waves must support the selected throughput
-  concurrency and 2% tie rule. No actual capacity measurements or automatic
-  production runtime profile integration are claimed. The HTTP binding resolves
-   supplied measured registry records; see [profile boundary](capacity-profiles.md).
-- [x] **Read-only profile-validation HTTP slice:** strict full-profile input,
-   server-owned current identities and registry paths, exact measured-record and
-   sample comparison, read-only SQLite access, bounded body/worker admission and
-   retained worker slots across timeout/disconnect. This validates supplied
-   evidence; it does not measure capacity or assert runtime readiness.
-- [x] **Read-only health HTTP precursor:** injected atomic snapshots, bounded
-  dependency probes, strict safe diagnostics and fail-closed liveness/readiness
-  routes. Production bootstrap wiring remains absent, so this is not deployed
-  readiness or GPU proof. See [health HTTP boundary](health-http.md).
 - [ ] **Phase 6 — Production E2E, observability, deployment and runbooks.**
 
-- [x] **Supervised runtime composition precursor:** parent-rooted pre-child GPU
-  capture, explicit host-PID attestation, exact binding preflight, combined RM and
-  health HTTP, live dependency gates, daemon-loss termination, permanent RM
-  shutdown and retained bounded cleanup. Local synthetic-profile/provider tests
-  include exact loopback output, profile mutation, startup/stop races, repeated
-  cancellation and cleanup timeout. Real `OwnedOllama` has separate installed
-  three-model candidate evidence. No actual measured profile or approved image
-  is supplied by this slice.
+Latest continuation: a candidate real QueueScheduler → ResourceManager → CoEdIT
+check now passes offline, both as root and UID/GID 65534. It verifies accepted
+pre-dispatch SQLite close/reopen, exact durable result/receipt identity, and a
+completed late delegate response fenced from cancelled publication. This is not
+process-crash/in-flight recovery, HTTP deployment, measured capacity or provider
+interruption proof. The existing installed three-model switching check also
+passes as UID/GID 65534 with the real private Ollama supervisor. Distinct
+`llm`/`ollama` users remain unimplemented. See the
+[scheduler candidate check](scheduler-adapter-gpu-check.md).
 
-Verification: **294 tests passed** in 31.593 seconds using
-`.venv/bin/python -W error -m unittest discover -s tests -p 'test_*.py'`; compilation of services,
-tests and tools passed. The focused scheduler/HTTP/publication suites passed
-**86 tests**; the stop-before-publication regression passed five repeated runs.
-The profile/artifact HTTP/profile-store/OpenAPI focused suites passed **50 tests**.
-The compatibility input/runtime/packaging suites passed **36 tests**.
-The latest GPU-proof/provider/RM/packaging/input-bound focused suites passed
-**60 tests**. CLI timeout/overflow cleanup passed three repeated runs with forced
-garbage collection and an unraisable-exception hook, without pipe/transport warnings.
-The separate actual-adapter harness passed **9 local tests**, including owned
-orphan-group and cancelled-launch cleanup. Its hash-locked dependency layer built
-with networking disabled. Real GPU execution was initially **environment-blocked**:
-the read-only Docker-host procfs binding did not provide `/host/proc/self/stat`
-(`procfs_missing`). The owned container was removed and verified absent. No
-real-adapter inference/residency/baseline success is claimed; further GPU testing
-requires operator repair of host procfs availability and NVML namespace alignment.
-A bounded retry after adding the devcontainer's read-only `/proc` -> `/host/proc`
-mount failed with the same `procfs_missing` in **5.685 seconds**, before model
-readiness. The separate adapter container retained its own explicit read-only
-bind, exact GPU UUID and disabled networking; it was removed and verified absent.
-The devcontainer configuration alone did not establish procfs availability in
-that separately launched Docker runtime. The adapter now uses authoritative
-container `/proc` with required `--pid=host`; focused adapter/GPU-proof verification
-passed **21 tests in 0.148 seconds** and compilation passed. A rebuilt offline
-image (`sha256:b9e6ae2aa0440e3f4d4dd9b7f33ad9c06e914538dbca465493c44d88ddf36954`)
-advanced beyond `procfs_missing`, then exposed the dedicated-GPU assumption.
-The ownership proof now tolerates continuously changing, provably foreign GPU
-processes and compares only positively proved supervisor descendants. Focused
-GPU-proof/adapter/provider/RM verification passes **74 tests** with warnings as
-errors, and compilation passes. The latest offline image
-(`sha256:8bc37a2e60cdbb14c4ed067eeb602b58540af7214bc300dfc257d62ff5293c53`)
-built successfully. Its actual run failed closed before readiness with `GPU
-baseline ownership could not be observed`: at least one current NVML PID could
-not be classified from authoritative procfs. The owned container was removed and
-verified absent. Foreign competition is no longer itself a blocker, but actual
-inference, residency, cleanup or capacity/readiness success is not yet proved.
-Bounded retry/backoff, complete confirmation classification and stable foreign
-ancestry fencing now have **83-test** focused regression evidence. A rebuilt
-network-disabled image
-(`sha256:c1ddec1ae3ab6cb43cf5081423c111da493281aebb9be65c5a101651aacd9a10`)
-still failed closed at baseline ownership. A minimal real diagnostic isolated a
-persistent graphics NVML PID absent from Linux procfs while Ollama was running;
-compute was empty, the other graphics PID was procfs-readable, and pre-Ollama
-samples were empty. Exhaustively proving that PID's foreign provenance was later
-rejected as beyond G4.1. The proof now ignores unconnected non-supervisor NVML
-PIDs and requires strict, stable positive evidence only for service-owned
-descendants. Focused GPU-proof/adapter/provider/RM verification passes **88
-tests** with warnings as errors, and compilation passes. A new actual run is
-required before inference, residency or cleanup advances beyond unproved.
-The subsequent goal-focused actual run passed with Ollama 0.11.6: two bounded
-inferences completed, one supervisor-descendant GPU runner was positively proved,
-the old model became absent after unload, stale-session submission was rejected,
-and the identity-fenced daemon group and named container were gone. Two baseline
-NVML PIDs were left unrelated/unknown and untouched. Focused verification passes
-94 tests. This advances G4.1 candidate evidence only; G4.2 remains unproved.
-The focused health/OpenAPI suites passed **15 tests** in **0.144 seconds** with
-warnings treated as errors; service/test/tool compilation passed. This proves
-only the unwired read-only health boundary with injected state, not production
-bootstrap readiness. See `docs/adapter-gpu-check.md` for the exact GPU runtime
-boundary and commands.
-Review regressions were repaired.
-These are unit/local integration results, **not** qualifying provider/GPU E2E.
-The expanded three-model RM GPU candidate check passed separately, including
-normal lifecycle (41 seconds) and injected child-process loss (36 seconds).
-Both scenarios passed again after the bounded raw-input and image-packaging
-repairs. SmolLM now proves a conservative no-truncation bound for its configured
-printable-ASCII bucket, not arbitrary UTF-8 or model-maximum inputs.
-All three failed attempts were fenced and each owned process group disappeared
-with the NVML process baseline restored before the next load. Execution-entry
-notification is not proof of GPU-kernel entry or interruptibility. This is not
-the full compatibility matrix or measured capacity acceptance.
-See the [proof inventory](../.opencode/skills/goal-oriented-design/references/e2e-proof.md).
-No leaf goal is `done`.
+The separate [production-image foundation](production-image-foundation.md) now
+has verified retained-input staging (54 hash-locked wheels), a successful clean
+CUDA-based build, and offline non-root help/import/ownership smoke checks.
+Fourteen focused deployment tests pass. It deliberately refuses serving until
+distinct-user supervision is implemented; OS package snapshots, actual deployed
+readiness and production E2E remain gaps. Phase 6 is not complete.
 
-Latest CoEdIT verification: **369 tests passed in 39.766 seconds** with warnings
-as errors; compilation passed. The **36-test** focused check passed in 2.791
-seconds. Offline image
-`sha256:e6187ee93a7c9c9a913f983813c6d172eb09ccd8c0d8729f1e146ffef9394582`
-passed actual normal and injected-process-loss scenarios on the selected GPU.
-One strict descendant worker was proved; both owned containers were removed.
-This is candidate adapter evidence for G4.1/G4.3, not measured G4.2 capacity or
-production deployment proof.
-
-The GECToR slice adds an installable, offline, worker-isolated adapter on
-the same fenced Python transport. It is deliberately limited to the exact
-float32, native-batch-one, one-iteration, 128-subword bucket and claims no
-measured capacity. The selected manifest, safetensors loading completeness,
-verb vocabulary, no-truncation preprocessing, output bound, and child GPU
-identity are checked independently. Actual offline GECToR 1.2.0 normal and
-injected-process-loss runs now pass through the installed adapter and RM.
-The normal run proves two aligned responses, overlong-input rejection without
-poisoning the worker, one owned GPU runner, stale-session rejection and cleanup.
-Both named containers were verified absent. Full discovery passed **391 tests
-in 40.037 seconds**, focused verification **53 in 2.808 seconds**, and compilation
-and whitespace checks passed. Candidate image:
-`sha256:fed8212118fb3f4309826479cd4fddeaa83701428d1a9f1198b4054e56537389`.
-See [GECToR candidate commands](gector-adapter-gpu-check.md). Actual combined
-installed-adapter switching subsequently passed as recorded below. Production
-packaging and measured profiles remain unfinished; these checks do not establish
-production deployment or measured capacity.
-
-The actual installed-adapter roundtrip now passes offline under one ResourceManager
-and one parent-rooted GPU proof: SmolLM → CoEdIT → GECToR → SmolLM, three
-cleanup-gated replacements, four successful responses, stale submit/cancel
-rejection and one CoEdIT execution-entry cancellation with no exposed result.
-Final provider/daemon/GPU cleanup passed and the owned container was verified
-absent. Candidate image:
-`sha256:6785609cd5c7bfa792f9f839d481b4b0899ce8cdc96cd01ff33d40e7a8829fe2`.
-Focused verification passed **91 tests**, full discovery **396**, compilation and
-whitespace checks passed. See [switching commands](three-model-adapter-gpu-check.md).
-This replaces the experimental-adapter switching gap with candidate installed
-boundary evidence, not measured capacity, kernel interruption, production health
-or scheduler-to-server GPU E2E.
+The detailed bounded evidence, verification counts, candidate digests, and
+limitations are in the
+[evidence ledger](queue-scheduler-resource-manager-plan-partial_completed.md).
 
 ## 2. Scope and fixed decisions
 
@@ -594,17 +386,16 @@ Provisioning bootstraps the actual ResourceManager and uses its normal adapter,
 residency, admission, timing, and cleanup paths. For each model, and for every
 configured Ollama context-size estimate, it performs:
 
-Implementation precursor: identity-fenced `LinuxGPUProof.memory()` now supplies
-off-loop, whole-device NVML total/used/free point observations. The offline
-installed-adapter candidate passed six ordered snapshots (before children,
-after four inference/residency checks, after owned cleanup), with stable exact
-GPU identity/total and no change to unmeasured admission. Seventy focused tests
-passed. This is not the runner described below: sparse post-inference points
-cannot prove peak incremental VRAM, a 20% reserve, memory-safe `N`, or throughput
-optimum. CoEdIT/GECToR still serialize batch-one worker calls; real simultaneous
-execution instrumentation and a suitable concurrent/native-batch path remain
-required before a higher-concurrency sweep. A successful p=1 check alone does
-not justify asserting `N=1`. See [candidate evidence](three-model-adapter-gpu-check.md).
+The current implementation has a bounded native-batch observation precursor; see the
+[evidence ledger](queue-scheduler-resource-manager-plan-partial_completed.md#memory-observation-precursor).
+It is insufficient for this procedure because a proved memory-safe `N`,
+production throughput optimum, and the full decoder-workload safety bound
+ remain unproved. CoEdIT now passes the p=16 throughput candidate and every
+ incremental point p=1..16 with four repeats, exact maximum input and decoder
+ workload witnesses, and owned cleanup. This reaches an implementation ceiling,
+ not a memory bound. GECToR remains outside this
+native-batch evidence. A successful p=1 check alone does not justify asserting
+`N=1`.
 
 1. Build or validate a maximum-sized valid benchmark request. Prefer an adapter
    generator that creates locally valid input and verifies a valid non-empty
@@ -989,6 +780,11 @@ proof. Use the target GPU, host driver, and NVIDIA Container Toolkit.
 - Implement server protocol, session/attempt fencing,
   `optimal_parallelism + m` admission, and the three real adapters with
   cancellation and cleanup fencing.
+- CoEdIT admission now performs bounded local envelope/bucket checks rather than
+  serializing tokenizer RPCs before native batching. The child still validates
+  every exact batch item before model execution; only its typed request rejection
+  is recoverable, while uncertain worker errors fail closed. This leaves the
+  fixed 5 ms batching policy, admission limits, and default p=1 unchanged.
 - Exit: local integration tests prove stale-generation rejection, bounded
   backpressure, and adapter lifecycle behavior.
 
@@ -999,6 +795,23 @@ proof. Use the target GPU, host driver, and NVIDIA Container Toolkit.
   scaling algorithms, SQLite profiles, and runtime fail-closed validation.
 - Exit: all three models load from the volume with network disabled and an
   identity mismatch prevents startup/admission.
+
+The CoEdIT `--discover-memory` precursor now records four serial baselines and
+four repeats at every integer point through the configured ceiling. It rejects
+undercovered decoder work and invalid native, timing, allocator, memory or
+identity evidence. Progress watches resume from the preceding completed wave,
+so a long discovery does not require enlarging ResourceManager event retention.
+The offline p=1..16 run passed 64 waves/544 requests; bounded whole-device
+observations do not establish exhaustive peaks or a proved `memory_safe_n`.
+Profiles remain ineligible and runtime defaults remain p=1.
+
+Session closeout extends the explicit discovery ceiling to 32, while throughput
+candidates remain capped at 16. The offline run passed 128 waves/2,112 requests
+with exact input128/output64 witnesses, native correlation, zero observation
+drops and owned cleanup. All 162 task-related tests passed. Minimum sampled
+free memory was 7,862,497,280 bytes; no resource limit was found. The observed
+ceiling is not `memory_safe_n`, no profile is eligible, and G4.1/G4.2/G4.3 remain
+partial. Commands and artifact identity: [CoEdIT check](coedit-capacity-check.md).
 
 ### Phase 6 — Production-boundary proof and operations
 

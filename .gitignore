@@ -4,3 +4,4 @@
 *.whl
 *.tgz
 .compatibility/context/models
+/deploy/docker/.inputs/
