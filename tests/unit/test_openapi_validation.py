@@ -147,6 +147,25 @@ class ResourceManagerOpenApiTests(unittest.TestCase):
         ):
             self._validate_ref(payload, error_schema, self.document)
 
+    def test_health_operations_and_representative_wire_responses_validate(self):
+        paths = self.document["paths"]
+        self.assertNotIn("x-implementation", paths["/health/live"]["get"])
+        self.assertNotIn("x-implementation", paths["/health/ready"]["get"])
+        self.assertNotIn("x-implementation", paths["/health/dependencies"]["get"])
+        self._validate_ref({"live": True}, "#/components/schemas/HealthLive", self.document)
+        self._validate_ref({"ready": False, "reasons": [{"phase": "startup"}]},
+                           "#/components/schemas/HealthReady", self.document)
+        self._validate_ref({"ready": False, "reasons": [{"dependency": "gpu", "reason": "probe_timeout"}]},
+                           "#/components/schemas/HealthReady", self.document)
+        dependency = {"ok": False, "reason": "unavailable"}
+        self._validate_ref({"dependencies": {name: dependency for name in (
+            "sqlite", "gpu", "artifacts", "adapter", "ollama", "profile", "cleanup")}},
+                           "#/components/schemas/HealthDependencies", self.document)
+        for invalid in ({}, {"phase": "startup", "dependency": "gpu"},
+                        {"dependency": "gpu"}, {"phase": "startup", "reason": "probe_failed"}):
+            with self.assertRaises(jsonschema.ValidationError):
+                self._validate_ref(invalid, "#/components/schemas/HealthReason", self.document)
+
     def test_scheduler_error_stop_and_sse_wire_schemas_match_adapter(self):
         document = deepcopy(self.document)
         # OpenAPI 3's ``nullable`` is not understood by jsonschema's

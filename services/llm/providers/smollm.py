@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import signal
 import tempfile
+import time
 
 import aiohttp
 
@@ -23,6 +24,8 @@ from .input_bounds import (SMOLLM_MAX_RAW_BYTES, frame_smollm_prompt,
 _GGUF = "SmolLM2-1.7B-Instruct-Q8_0.gguf"
 _JSON_LIMIT = 128 * 1024
 _CLI_LIMIT = 128 * 1024
+_ABSENCE_TIMEOUT_SECONDS = 5.0
+_ABSENCE_POLL_INTERVAL_SECONDS = 0.2
 
 
 class SmolLMProvider:
@@ -37,6 +40,10 @@ class SmolLMProvider:
         self._profile: CapacityProfile | None = None
         self._cleanup_verified = False
         self._ready = False
+        # Keep the clock and wait operation injectable so cleanup polling can
+        # be tested without making the bounded wait real-time.
+        self._absence_clock = time.monotonic
+        self._absence_sleep = asyncio.sleep
 
     @property
     def _url(self) -> str:
@@ -131,9 +138,12 @@ class SmolLMProvider:
         proc = None
         drains: tuple[asyncio.Task[bytes], ...] = ()
         try:
+            env = {"OLLAMA_HOST": self._url, "PATH": "/usr/bin:/bin"}
+            if self.config.ollama_home is not None:
+                env["HOME"] = str(self.config.ollama_home)
             proc = await asyncio.create_subprocess_exec(
                 self.config.ollama_binary, "create", name, "-f", modelfile,
-                env={"OLLAMA_HOST": self._url, "PATH": "/usr/bin:/bin"},
+                env=env,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 start_new_session=True)
             async def drain(stream):
@@ -349,12 +359,20 @@ class SmolLMProvider:
 
     async def _check_absent(self) -> None:
         assert self._session is not None
-        async with self._session.get("/api/ps", allow_redirects=False) as response:
-            if response.status != 200:
-                raise RuntimeError("cannot verify Ollama cleanup")
-            value = await self._json(response)
-        if not isinstance(value, dict) or not isinstance(value.get("models"), list) or value["models"]:
-            raise RuntimeError("Ollama still has resident models")
+        deadline = self._absence_clock() + _ABSENCE_TIMEOUT_SECONDS
+        while True:
+            async with self._session.get("/api/ps", allow_redirects=False) as response:
+                if response.status != 200:
+                    raise RuntimeError("cannot verify Ollama cleanup")
+                value = await self._json(response)
+            if not isinstance(value, dict) or not isinstance(value.get("models"), list):
+                raise RuntimeError("Ollama still has resident models")
+            if not value["models"]:
+                return
+            remaining = deadline - self._absence_clock()
+            if remaining <= 0:
+                raise RuntimeError("Ollama still has resident models")
+            await self._absence_sleep(min(_ABSENCE_POLL_INTERVAL_SECONDS, remaining))
 
     async def unload(self) -> None:
         async with self._lock:
@@ -391,9 +409,8 @@ class SmolLMProvider:
             self._ready = False
 
     async def verify_cleanup(self) -> bool:
-        if self.config.gpu_proof is None or self._session is not None or self._model is not None or not self._cleanup_verified:
-            return False
-        return (await self._resolve(self.config.gpu_proof.cleanup())) is True
+        return (self._session is None and self._model is None and
+                self._cleanup_verified)
 
     async def validate_input(self, payload: bytes, *, context_size: int | None, bucket_identity: str | None) -> None:
         if (not isinstance(payload, bytes) or self._profile is None or context_size != 512

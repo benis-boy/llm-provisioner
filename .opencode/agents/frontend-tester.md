@@ -54,7 +54,7 @@ If a command or browser launch reports an environment or infrastructure problem:
 1. Stop; do not try alternate environment workarounds or broader commands.
 2. Capture only the command and the error already produced. Do not run extra environment diagnostics.
 3. Return `blocked` and forward the issue to the Design agent.
-4. Recommend that the Design agent abort further testing and notify the user to repair the environment.
+4. Recommend the Design agent to prioritize to repair the environment.
 
 Return exactly these sections:
 

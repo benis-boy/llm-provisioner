@@ -42,11 +42,11 @@ paths:
   /provisioning/validate-profile:
     post: {tags: [provisioning], operationId: validateProfile, parameters: [{$ref: '#/components/parameters/IdempotencyKey'}], requestBody: {$ref: '#/components/requestBodies/ProfileRequest'}, responses: {'200': {$ref: '#/components/responses/FutureAck'}, '400': {$ref: '#/components/responses/FutureError'}, '413': {$ref: '#/components/responses/FutureError'}, '422': {$ref: '#/components/responses/FutureError'}, '429': {$ref: '#/components/responses/FutureError'}, '504': {$ref: '#/components/responses/FutureError'}}}
   /health/live:
-    get: {x-implementation: future, tags: [health], operationId: healthLive, responses: {'200': {$ref: '#/components/responses/FutureHealth'}}}
+    get: {tags: [health], operationId: healthLive, responses: {'200': {$ref: '#/components/responses/HealthLive'}}}
   /health/ready:
-    get: {x-implementation: future, tags: [health], operationId: healthReady, responses: {'200': {$ref: '#/components/responses/FutureHealth'}, '503': {$ref: '#/components/responses/FutureHealth'}}}
+    get: {tags: [health], operationId: healthReady, responses: {'200': {$ref: '#/components/responses/HealthReady'}, '503': {$ref: '#/components/responses/HealthReady'}}}
   /health/dependencies:
-    get: {x-implementation: future, tags: [health], operationId: healthDependencies, responses: {'200': {$ref: '#/components/responses/FutureHealth'}}}
+    get: {tags: [health], operationId: healthDependencies, responses: {'200': {$ref: '#/components/responses/HealthDependencies'}}}
   /metrics:
     get: {x-implementation: future, tags: [health], operationId: metrics, responses: {'200': {description: Metrics, content: {text/plain: {schema: {type: string}}}}}}
 components:
@@ -74,6 +74,9 @@ components:
     SchedulerStop: {description: Scheduler stop acknowledgement, content: {application/json: {schema: {$ref: '#/components/schemas/SchedulerStop'}}}}
     FutureCapacity: {description: Future capacity, content: {application/json: {schema: {$ref: '#/components/schemas/Capacity'}}}}
     FutureHealth: {description: Future health, content: {application/json: {schema: {$ref: '#/components/schemas/Health'}}}}
+    HealthLive: {description: Process liveness, content: {application/json: {schema: {$ref: '#/components/schemas/HealthLive'}}}}
+    HealthReady: {description: Readiness, content: {application/json: {schema: {$ref: '#/components/schemas/HealthReady'}}}}
+    HealthDependencies: {description: Bounded dependency diagnostics, content: {application/json: {schema: {$ref: '#/components/schemas/HealthDependencies'}}}}
     FutureSse: {description: Future SSE, content: {text/event-stream: {schema: {$ref: '#/components/schemas/SseEnvelope'}}}}
     FutureError: {description: Future error, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
     ArtifactVerification: {description: Selected artifact integrity result, content: {application/json: {schema: {$ref: '#/components/schemas/ArtifactVerification'}}}}
@@ -108,6 +111,11 @@ components:
     SchedulerStop: {type: object, additionalProperties: false, required: [accepted, cancelled, affected], properties: {accepted: {type: boolean, enum: [true]}, cancelled: {type: boolean}, affected: {type: integer, minimum: 0}}}
     Backpressure: {type: object, additionalProperties: false, required: [code, retryable], properties: {code: {type: string, enum: [capacity_backpressure]}, retryable: {type: boolean, enum: [false]}}}
     Health: {type: object, additionalProperties: false, required: [ready, details], properties: {ready: {type: boolean}, details: {type: object, additionalProperties: false, properties: {sqlite: {type: boolean}, gpu: {type: boolean}, artifacts: {type: boolean}, profile: {type: boolean}, cleanup: {type: boolean}}}}}
+    HealthLive: {type: object, additionalProperties: false, required: [live], properties: {live: {type: boolean, enum: [true]}}}
+    HealthReason: {oneOf: [{type: object, additionalProperties: false, required: [phase], properties: {phase: {type: string, enum: [startup, provisioning, loading, unloading, profile_mismatch, profile_unproved, cleanup_failed, state_malformed]}}}, {type: object, additionalProperties: false, required: [dependency, reason], properties: {dependency: {type: string, enum: [sqlite, gpu, artifacts, adapter, ollama, profile, cleanup]}, reason: {type: string, enum: [unavailable, probe_timeout, probe_failed, state_missing, state_malformed, overloaded]}}}]}
+    HealthReady: {type: object, additionalProperties: false, required: [ready, reasons], properties: {ready: {type: boolean}, reasons: {type: array, maxItems: 8, items: {$ref: '#/components/schemas/HealthReason'}}}}
+    HealthDependency: {type: object, additionalProperties: false, required: [ok, reason], properties: {ok: {type: boolean}, reason: {type: string, enum: [ok, unavailable, probe_timeout, probe_failed, state_missing, state_malformed, overloaded]}}}
+    HealthDependencies: {type: object, additionalProperties: false, required: [dependencies], properties: {dependencies: {type: object, additionalProperties: false, required: [sqlite, gpu, artifacts, adapter, ollama, profile, cleanup], properties: {sqlite: {$ref: '#/components/schemas/HealthDependency'}, gpu: {$ref: '#/components/schemas/HealthDependency'}, artifacts: {$ref: '#/components/schemas/HealthDependency'}, adapter: {$ref: '#/components/schemas/HealthDependency'}, ollama: {$ref: '#/components/schemas/HealthDependency'}, profile: {$ref: '#/components/schemas/HealthDependency'}, cleanup: {$ref: '#/components/schemas/HealthDependency'}}}}}
     Error: {type: object, additionalProperties: false, required: [code, message, retryable], properties: {code: {type: string}, message: {type: string}, retryable: {type: boolean}, attemptToken: {type: string}}}
     RMStartSession: {type: object, additionalProperties: false, required: [schedulerId, modelId], oneOf: [{required: [contextSizeEstimate]}, {required: [bucketIdentity]}], properties: {schedulerId: {type: string, minLength: 1}, modelId: {$ref: '#/components/schemas/ModelId'}, contextSizeEstimate: {type: integer, minimum: 1}, bucketIdentity: {type: string, minLength: 1}}}
     RMSubmit: {type: object, additionalProperties: false, required: [requestId, attemptToken, inputReference], not: {required: [contextSizeEstimate, bucketIdentity]}, properties: {requestId: {type: string, minLength: 1}, attemptToken: {type: string, minLength: 1}, inputReference: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}, contextSizeEstimate: {type: integer, minimum: 1}, bucketIdentity: {type: string, minLength: 1}}}

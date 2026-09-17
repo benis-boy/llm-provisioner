@@ -44,6 +44,10 @@ class SmolLMProviderConfig:
     ollama_port: int = 11434
     gpu_proof: GPUProof | None = None
     ollama_binary: str = "ollama"
+    # The Ollama CLI is deliberately given a private HOME rather than inheriting
+    # the adapter's environment.  None preserves the configuration API for
+    # callers that do not invoke the CLI; real adapters must provide it.
+    ollama_home: Path | None = None
 
     def __post_init__(self) -> None:
         for value, name in ((self.manifest_sha256, "manifest digest"), (self.model_sha256, "model digest")):
@@ -71,3 +75,7 @@ class SmolLMProviderConfig:
             raise ValueError("request timeout must be positive")
         if not isinstance(self.ollama_binary, str) or not self.ollama_binary:
             raise ValueError("Ollama binary is required")
+        if self.ollama_home is not None:
+            if not isinstance(self.ollama_home, Path) or not self.ollama_home.is_absolute():
+                raise ValueError("Ollama CLI HOME must be an absolute Path")
+            object.__setattr__(self, "ollama_home", self.ollama_home.resolve())

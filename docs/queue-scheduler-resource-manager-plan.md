@@ -12,13 +12,14 @@ durable optional-function evaluation, an async QueueScheduler, a transport-neutr
 ResourceManager core, RM and scheduler HTTP/JSON/SSE bindings, artifact verification
 and experimental compatibility tools. A read-only selected-artifact verification
 HTTP endpoint and read-only exact measured-profile validation also exist. It does
-**not** yet contain capacity-measurement or health HTTP bindings, a production image,
+**not** yet contain capacity-measurement HTTP bindings, production health-state
+wiring, a production image,
 complete three-model production adapters, or measured provisioning runtime. The
 installable SmolLM adapter and Linux GPU-ownership proof now have local regression
 coverage, but no real-adapter GPU/deployment verification. Unchecked work remains target-state design. Historical
 capacity notes are not implementation evidence.
 
-### Implementation progress (2026-09-16)
+### Implementation progress (2026-09-17)
 
 Work is tracked in logical slices, not whole-phase completion claims. See
 [implementation decisions](implementation-decisions.md) and
@@ -80,7 +81,7 @@ Work is tracked in logical slices, not whole-phase completion claims. See
    Failed initial RM lifecycle now cleans up before permitting another start;
    unproved cleanup remains fenced. This is not production packaging or measured capacity.
 - [x] **Linux GPU ownership proof slice:** lazy NVML access, empty compute/graphics
-   baseline, exact physical GPU, bounded procfs ancestry and PID-reuse checks,
+   baseline, exact physical GPU, positive bounded procfs ancestry and PID-reuse checks,
    and cleanup absence. Real capture requires explicit host-PID-namespace
    attestation; deployment must supply authoritative procfs and supervisor identity.
    Current evidence uses synthetic NVML/procfs, not real GPU execution.
@@ -113,6 +114,10 @@ Work is tracked in logical slices, not whole-phase completion claims. See
    sample comparison, read-only SQLite access, bounded body/worker admission and
    retained worker slots across timeout/disconnect. This validates supplied
    evidence; it does not measure capacity or assert runtime readiness.
+- [x] **Read-only health HTTP precursor:** injected atomic snapshots, bounded
+  dependency probes, strict safe diagnostics and fail-closed liveness/readiness
+  routes. Production bootstrap wiring remains absent, so this is not deployed
+  readiness or GPU proof. See [health HTTP boundary](health-http.md).
 - [ ] **Phase 6 — Production E2E, observability, deployment and runbooks.**
 
 Verification: **294 tests passed** in 31.593 seconds using
@@ -126,12 +131,55 @@ The latest GPU-proof/provider/RM/packaging/input-bound focused suites passed
 garbage collection and an unraisable-exception hook, without pipe/transport warnings.
 The separate actual-adapter harness passed **9 local tests**, including owned
 orphan-group and cancelled-launch cleanup. Its hash-locked dependency layer built
-with networking disabled. Real GPU execution is currently **environment-blocked**:
+with networking disabled. Real GPU execution was initially **environment-blocked**:
 the read-only Docker-host procfs binding did not provide `/host/proc/self/stat`
 (`procfs_missing`). The owned container was removed and verified absent. No
 real-adapter inference/residency/baseline success is claimed; further GPU testing
 requires operator repair of host procfs availability and NVML namespace alignment.
-See `docs/adapter-gpu-check.md` for the exact runtime boundary and commands.
+A bounded retry after adding the devcontainer's read-only `/proc` -> `/host/proc`
+mount failed with the same `procfs_missing` in **5.685 seconds**, before model
+readiness. The separate adapter container retained its own explicit read-only
+bind, exact GPU UUID and disabled networking; it was removed and verified absent.
+The devcontainer configuration alone did not establish procfs availability in
+that separately launched Docker runtime. The adapter now uses authoritative
+container `/proc` with required `--pid=host`; focused adapter/GPU-proof verification
+passed **21 tests in 0.148 seconds** and compilation passed. A rebuilt offline
+image (`sha256:b9e6ae2aa0440e3f4d4dd9b7f33ad9c06e914538dbca465493c44d88ddf36954`)
+advanced beyond `procfs_missing`, then exposed the dedicated-GPU assumption.
+The ownership proof now tolerates continuously changing, provably foreign GPU
+processes and compares only positively proved supervisor descendants. Focused
+GPU-proof/adapter/provider/RM verification passes **74 tests** with warnings as
+errors, and compilation passes. The latest offline image
+(`sha256:8bc37a2e60cdbb14c4ed067eeb602b58540af7214bc300dfc257d62ff5293c53`)
+built successfully. Its actual run failed closed before readiness with `GPU
+baseline ownership could not be observed`: at least one current NVML PID could
+not be classified from authoritative procfs. The owned container was removed and
+verified absent. Foreign competition is no longer itself a blocker, but actual
+inference, residency, cleanup or capacity/readiness success is not yet proved.
+Bounded retry/backoff, complete confirmation classification and stable foreign
+ancestry fencing now have **83-test** focused regression evidence. A rebuilt
+network-disabled image
+(`sha256:c1ddec1ae3ab6cb43cf5081423c111da493281aebb9be65c5a101651aacd9a10`)
+still failed closed at baseline ownership. A minimal real diagnostic isolated a
+persistent graphics NVML PID absent from Linux procfs while Ollama was running;
+compute was empty, the other graphics PID was procfs-readable, and pre-Ollama
+samples were empty. Exhaustively proving that PID's foreign provenance was later
+rejected as beyond G4.1. The proof now ignores unconnected non-supervisor NVML
+PIDs and requires strict, stable positive evidence only for service-owned
+descendants. Focused GPU-proof/adapter/provider/RM verification passes **88
+tests** with warnings as errors, and compilation passes. A new actual run is
+required before inference, residency or cleanup advances beyond unproved.
+The subsequent goal-focused actual run passed with Ollama 0.11.6: two bounded
+inferences completed, one supervisor-descendant GPU runner was positively proved,
+the old model became absent after unload, stale-session submission was rejected,
+and the identity-fenced daemon group and named container were gone. Two baseline
+NVML PIDs were left unrelated/unknown and untouched. Focused verification passes
+94 tests. This advances G4.1 candidate evidence only; G4.2 remains unproved.
+The focused health/OpenAPI suites passed **15 tests** in **0.144 seconds** with
+warnings treated as errors; service/test/tool compilation passed. This proves
+only the unwired read-only health boundary with injected state, not production
+bootstrap readiness. See `docs/adapter-gpu-check.md` for the exact GPU runtime
+boundary and commands.
 Review regressions were repaired.
 These are unit/local integration results, **not** qualifying provider/GPU E2E.
 The expanded three-model RM GPU candidate check passed separately, including

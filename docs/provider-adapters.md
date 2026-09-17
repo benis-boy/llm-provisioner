@@ -19,21 +19,23 @@ required completion and prompt-count proof is strict.
 
 The local `ollama create` subprocess has a bounded aggregate stdout/stderr
 drain, timeout, and process-group reap. A failed import remains adapter-owned
-until Resource Manager cleanup has made `/api/ps` absence and the injected,
-strict-`True` cleanup proof available. It is not safe to execute before
+until Resource Manager cleanup has made `/api/ps` model absence available. It is
+not safe to execute before
 readiness, and direct execution additionally enforces the configured measured
 parallelism; Resource Manager remains the normal admission authority.
 
 Readiness preloads the model and requires `/api/ps` to show exactly the canonical
 `<digest-name>:latest` model,
-fully resident in VRAM, plus concrete Linux residency evidence: the configured
+fully resident in VRAM, plus concrete Linux shared-GPU residency evidence: the configured
 supervisor and non-empty, unique runner identities must be exact descendants;
-missing or foreign evidence fails closed. Cleanup
-drains owned work, unloads, verifies that no model remains resident, and requires
-an injected strict positive cleanup proof. GPU timing remains incomplete for
+missing or unsafe ownership evidence fails closed. Model-switch cleanup drains
+owned work, unloads, and verifies that no model remains resident in private
+Ollama; reusable GPU processes may remain. Final adapter shutdown separately
+fences and terminates the owned daemon process group. Foreign GPU processes are
+tolerated and never controlled. GPU timing remains incomplete for
 Resource Manager accounting; authoritative host procfs and NVML are required by
 the real proof, while production image/bootstrap wiring remains an explicit
-deployment seam. Only the measured 512-token
+deployment seam. Only the explicitly unmeasured 512-token
 profile is accepted. Candidate aggregate identities and synthetic profiles are
 not production profile identities; the adapter does not claim arbitrary contexts
 or registry-origin provenance.

@@ -39,6 +39,7 @@ GGUF = "SmolLM2-1.7B-Instruct-Q8_0.gguf"
 OLLAMA_VERSION = "0.11.6"
 LOG_LIMIT = 64 * 1024
 _UUID = re.compile(r"^GPU-[A-Za-z0-9-]+$")
+PROC_ROOT = Path("/proc")
 
 
 def _digest(path: Path) -> str:
@@ -71,19 +72,24 @@ def _validate_port(port: int) -> None:
         raise ValueError("port must be in range 1..65535")
 
 
+def _runtime_home(model_store: Path) -> Path:
+    """Return the private HOME shared by the daemon and its import CLI."""
+    return model_store.resolve() / ".ollama-home"
+
+
 def _enable_subreaper() -> None:
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(36, 1, 0, 0, 0) != 0:
         raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER failed")
 
 
-LAUNCHER = r'''import os, sys
+LAUNCHER = rf'''import os, sys
 def fail(code):
     sys.stdout.write("HANDSHAKE_ERROR " + code + "\n")
     sys.stdout.flush()
     raise SystemExit(1)
 try:
-    raw = open("/host/proc/self/stat", "rb").read(4096)
+    raw = open("{PROC_ROOT}/self/stat", "rb").read(4096)
 except FileNotFoundError: fail("procfs_missing")
 except PermissionError: fail("procfs_permission")
 except OSError: fail("procfs_unavailable")
@@ -115,11 +121,16 @@ async def _drain(stream: asyncio.StreamReader, limit: int = LOG_LIMIT) -> bytes:
 async def _start_server(port: int, model_store: Path) -> tuple[asyncio.subprocess.Process, int, tuple[asyncio.Task[bytes], ...]]:
     _validate_port(port)
     _enable_subreaper()
+    model_store = model_store.resolve()
+    model_store.mkdir(mode=0o700, parents=True, exist_ok=True)
+    runtime_home = _runtime_home(model_store)
+    runtime_home.mkdir(mode=0o700, exist_ok=True)
+    runtime_home.chmod(0o700)
     env = {key: os.environ[key] for key in ("LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES",
-           "NVIDIA_VISIBLE_DEVICES", "NVIDIA_DRIVER_CAPABILITIES", "HOME", "TMPDIR", "TEMP", "TMP")
+           "NVIDIA_VISIBLE_DEVICES", "NVIDIA_DRIVER_CAPABILITIES", "TMPDIR", "TEMP", "TMP")
            if key in os.environ}
     env.update({"PATH": "/usr/bin:/bin", "OLLAMA_HOST": f"127.0.0.1:{port}",
-            "OLLAMA_MODELS": str(model_store), "OLLAMA_NUM_PARALLEL": "1",
+            "OLLAMA_MODELS": str(model_store), "HOME": str(runtime_home), "OLLAMA_NUM_PARALLEL": "1",
             "OLLAMA_MAX_LOADED_MODELS": "1"})
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-c", LAUNCHER, env=env,
@@ -142,14 +153,18 @@ async def _start_server(port: int, model_store: Path) -> tuple[asyncio.subproces
         if host_pid <= 0 or host_start < 0: raise ValueError
         # The attested host PID must name the running launcher in authoritative
         # procfs.  This rejects malformed namespace handshakes and PID reuse.
-        stat_pid, stat_start = _stat_identity((Path("/host/proc") / str(host_pid) / "stat").read_bytes())
+        stat_pid, stat_start = _stat_identity((PROC_ROOT / str(host_pid) / "stat").read_bytes())
         if (stat_pid, stat_start) != (host_pid, host_start):
             raise RuntimeError("host PID handshake does not match procfs")
         # The direct child must still be the launched process in this namespace;
         # this is a liveness/reuse check, not an attempted host PID translation.
-        local_pid, local_start = _stat_identity((Path("/proc") / str(proc.pid) / "stat").read_bytes())
+        local_pid, local_start = _stat_identity((PROC_ROOT / str(proc.pid) / "stat").read_bytes())
         if local_pid != proc.pid or local_start != host_start:
             raise RuntimeError("launcher PID does not match local procfs")
+        # Save the leader's identity and session fence before handing it to
+        # cleanup.  --pid=host makes an unchecked killpg an unacceptable
+        # container-wide blast radius.
+        proc._adapter_group_fence = (host_pid, host_start, host_pid, host_pid)  # noqa: SLF001
     except BaseException as exc:
         try:
             await _cleanup_group(proc, drains)
@@ -217,11 +232,44 @@ def _profile(manifest: str, model: str, gpu: str) -> CapacityProfile:
 
 
 async def _stop_group(proc: asyncio.subprocess.Process, drains: tuple[asyncio.Task[bytes], ...]) -> bool:
-    for sig, wait in ((signal.SIGTERM, 5), (signal.SIGKILL, 5)):
+    def group_fence() -> tuple[int, int, int, int]:
         try:
-            os.killpg(proc.pid, sig)
+            raw = (PROC_ROOT / str(proc.pid) / "stat").read_bytes()
+            opening, closing = raw.find(b"("), raw.rfind(b")")
+            fields = raw[closing + 2:].split()
+            return (int(raw[:opening]), int(fields[19]), int(fields[2]), int(fields[3]))
+        except (OSError, ValueError, IndexError) as exc:
+            raise RuntimeError("owned Ollama leader identity is unavailable") from exc
+
+    expected = getattr(proc, "_adapter_group_fence", None)  # noqa: SLF001
+    if expected is None:
+        expected = group_fence()
+    expected_pid, expected_start, expected_pgrp, expected_session = expected
+    if expected_pid != proc.pid or expected_pgrp != proc.pid or expected_session != proc.pid:
+        raise RuntimeError("owned Ollama process group fence is invalid")
+
+    def signal_owned(sig: signal.Signals) -> bool | None:
+        try:
+            current = group_fence()
+        except RuntimeError:
+            # The leader may have exited before the child watcher observed it.
+            # The saved pgrp is checked below; this is not permission to signal.
+            return None
+        if current != expected:
+            return False
+        try:
+            os.killpg(expected_pgrp, sig)
         except ProcessLookupError:
-            pass
+            return None
+        return True
+
+    for sig, wait in ((signal.SIGTERM, 5), (signal.SIGKILL, 5)):
+        signaled = signal_owned(sig)
+        if signaled is False:
+            # Never trade a failed identity proof for a broader signal. The
+            # caller/container boundary must handle any remaining processes.
+            if proc.returncode is None:
+                raise RuntimeError("owned Ollama process group identity changed")
         try:
             await asyncio.wait_for(proc.wait(), wait)
         except asyncio.TimeoutError:
@@ -241,11 +289,13 @@ async def _stop_group(proc: asyncio.subprocess.Process, drains: tuple[asyncio.Ta
     gone = False
     while time.monotonic() < deadline:
         try:
-            os.killpg(proc.pid, 0)
+            os.killpg(expected_pgrp, 0)
         except ProcessLookupError:
             gone = True
             break
         except PermissionError:
+            # Existence could not be disproved.  A missing/reused leader is
+            # not evidence that the saved process group is gone.
             break
         await asyncio.sleep(.05)
     # Drains are bounded: an inherited pipe held by a surviving descendant is
@@ -328,6 +378,7 @@ async def run(args: argparse.Namespace) -> dict:
         document = await asyncio.to_thread(provision, {"SmolLM": source}, volume)
         daemon_store = root / "ollama-models"
         daemon, host_pid, drains = await _start_server(args.port, daemon_store)
+        runtime_home = _runtime_home(daemon_store)
         rm = ResourceManager(cleanup_timeout=60, stop_timeout=60, load_timeout=240)
         provider = None
         session = None
@@ -339,14 +390,15 @@ async def run(args: argparse.Namespace) -> dict:
             version = await _health(args.port)
             # Capture only after the daemon is healthy and before provider.load.
             proof = await asyncio.to_thread(LinuxGPUProof.capture, args.target_gpu_uuid,
-                host_pid, Path("/host/proc"), None, host_pid_namespace=True)
+                host_pid, PROC_ROOT, None, host_pid_namespace=True)
             gpu = GPUProof(proof.identity, proof.cleanup, proof.residency,
                            expected_supervisor=proof.supervisor_identity)
             config = SmolLMProviderConfig(volume, document["manifest_sha256"], model_hash,
                 args.target_gpu_uuid, "candidate-adapter-check", "candidate-smollm-provider",
                 allowed_context_sizes=(512,),
-                parallelism=1, request_timeout_seconds=60, ollama_port=args.port,
-                gpu_proof=gpu, ollama_binary="/usr/bin/ollama")
+                 parallelism=1, request_timeout_seconds=60, ollama_port=args.port,
+                 gpu_proof=gpu, ollama_binary="/usr/bin/ollama",
+                 ollama_home=runtime_home)
             provider = SmolLMProvider(config)
             profile = _profile(document["manifest_sha256"], model_hash, args.target_gpu_uuid)
             session = await rm.start_session("candidate-adapter-check", ModelId.SMOLLM, profile, provider,
@@ -365,7 +417,7 @@ async def run(args: argparse.Namespace) -> dict:
             await rm.stop_session(session.session_token, reason="completed", idempotency_key="adapter-check-stop")
             normal_cleanup = await provider.verify_cleanup()
             if not normal_cleanup:
-                raise RuntimeError("GPU cleanup proof did not restore the baseline")
+                raise RuntimeError("model cleanup proof did not remove the resident model")
             try:
                 await rm.submit(session.session_token, "stale", "attempt-1", b"Say hello.",
                     idempotency_key="adapter-check-stale", context_size=512)
@@ -379,7 +431,9 @@ async def run(args: argparse.Namespace) -> dict:
                 "small_completion": checks["small"], "upper_completion": checks["upper"],
                 "residency": {"supervisor_hostpid": residency.supervisor.pid,
                                "runner_hostpids": len(residency.runners)},
-                "cleanup_baseline": normal_cleanup, "ownedgroupgone": False}
+                "foreign_baseline_process_count": getattr(proof, "baseline_process_count", 0),
+                "cleanup_baseline": normal_cleanup,
+                "cleanup_model_absent": normal_cleanup, "ownedgroupgone": False}
             return evidence
         finally:
             if session is not None and not normal_cleanup:
@@ -414,7 +468,7 @@ def main() -> int:
     parser.add_argument("--target-gpu-uuid", required=True)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--host-pid-namespace", action="store_true",
-                        help="operator attests /host/proc is the NVML host PID namespace")
+                        help="operator attests /proc is the NVML host PID namespace")
     args = parser.parse_args()
     result = asyncio.run(asyncio.wait_for(run(args), 360))
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))

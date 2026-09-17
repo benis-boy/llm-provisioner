@@ -180,7 +180,63 @@ Further GPU testing stopped pending operator repair of authoritative host procfs
 availability and NVML PID-namespace alignment. See
 [command and limits](../../../../docs/adapter-gpu-check.md).
 
-`tests.unit.test_adapter_check` (**unit**, 9 tests) covers the actual in-process
+One bounded retry on 2026-09-17 after the devcontainer procfs mount was added
+failed non-zero in **5.685 seconds** with the same `Ollama launcher procfs_missing`
+before readiness. It used existing adapter image
+`sha256:30174aecfa41c99ff94228826c93f631618e2370c892426847d06f7ecec2c485`,
+the documented explicit Docker-host bind, exact GPU UUID, `--init`,
+`--network none` and host-PID attestation. The tester removed its owned
+`llm-compatibility-adapter-check-retry` container and verified absence. No further
+tests ran after the environment block. G4.1/G4.3 proof gaps remain unchanged:
+the devcontainer mount does not establish readable authoritative procfs in the
+separate adapter runtime or NVML PID alignment.
+
+The harness now uses authoritative `/proc` with required `--pid=host`. The GPU
+proof was redesigned for a shared physical GPU: only positively proved strict
+supervisor descendants are service-owned, while readable foreign process churn
+is tolerated and never controlled. The focused GPU-proof, adapter, SmolLM and RM
+suites pass **74 tests** with warnings treated as errors; compilation passes.
+Network-disabled image
+`sha256:8bc37a2e60cdbb14c4ed067eeb602b58540af7214bc300dfc257d62ff5293c53`
+built successfully. Its actual run failed closed before readiness with `GPU
+baseline ownership could not be observed`, meaning a current NVML PID could not
+be safely classified from procfs. The owned container was removed and verified
+absent. This is non-qualifying failure evidence: inference, service residency,
+cleanup and shared-contention capacity remain unproved.
+
+The ownership proof now adds bounded 10–50 ms retry backoff within a 250 ms
+post-ambiguity grace, fully classifies confirmation snapshots, and revalidates
+readable foreign ancestry before exclusion. Focused GPU-proof, adapter, SmolLM
+and RM verification passes **83 tests** with warnings as errors; compilation
+passes. Network-disabled image
+`sha256:c1ddec1ae3ab6cb43cf5081423c111da493281aebb9be65c5a101651aacd9a10`
+built successfully, but its actual run again failed closed at baseline
+ownership. A bounded diagnostic observed empty compute and graphics before
+Ollama; with Ollama, graphics reported one procfs-readable PID and one PID absent
+through ten 200 ms samples. The latter cannot be authoritatively classified from
+Linux procfs. Persistence is not accepted as foreign provenance, and all owned
+containers were removed and verified absent. This is non-qualifying failure
+evidence. The exhaustive-correlation requirement was subsequently removed as
+stricter than G4.1: unknown non-supervisor NVML PIDs are ignored and never
+controlled, while service ownership requires stable positive supervisor descent.
+The focused GPU-proof, adapter, SmolLM and RM suites pass **88 tests** with
+warnings as errors and compilation passes. No new production-boundary run has
+yet proved G4.1 inference/residency/cleanup; G4.2 contention capacity remains
+unproved.
+
+Latest goal-focused SmolLM adapter **e2e candidate evidence**: the exact
+network-disabled host-PID run on
+`GPU-d15a7ff9-a19b-3ece-7510-759a0bca1963` passed with Ollama 0.11.6. Two bounded
+requests produced nonempty completions; readiness positively proved one strict
+supervisor-descendant GPU runner; unload reached empty private Ollama model state;
+the stale session was rejected; and the identity-fenced daemon group and named
+container were verified gone. Two baseline NVML PIDs were recorded only as a
+bounded count and were neither exhaustively identified nor controlled. Focused
+GPU-proof/adapter/SmolLM/RM verification passes **94 tests** with warnings as
+errors. This advances the SmolLM portion of G4.1 only. It does not prove CoEdIT,
+GECToR, full production deployment, or G4.2 contention capacity.
+
+`tests.unit.test_adapter_check` (**unit**) covers the actual in-process
 RM lifecycle with mocked provider/GPU/daemon seams, selected artifact identities,
 unmeasured profile labeling, local orphaned process-group cleanup, launcher
 failure categorization and cancellation cleanup. Tests own temporary artifacts
@@ -196,7 +252,10 @@ Latest adapter/proof **unit** evidence (G4.1/G4.2/G4.3):
   absence before RM recovery. These are synthetic residency/profile fixtures,
   not real Ollama compatibility or measured GPU admission.
 - `tests.unit.test_gpu_proof`: synthetic procfs and injected NVML prove ancestry,
-  PID reuse/race rejection, exclusive baseline, MIG/API failures and explicit
+  PID reuse/race rejection (including ancestry mutation), unknown non-supervisor
+  PID tolerance, shared-GPU foreign churn,
+  positive service ownership,
+  MIG/API failures and explicit
   real-capture host-namespace attestation. Actual deployment must make that
   attestation truthful; these tests do not establish a host/container PID mapping.
 - `tests.unit.test_resource_manager`: failed initial readiness cleanup permits
@@ -212,6 +271,16 @@ Focused command: `.venv/bin/python -W error -m unittest -v tests.unit.test_gpu_p
 Tests own temporary artifacts, procfs fixtures, subprocesses, HTTP servers and
 event-loop resources. Candidate flat-image imports are independently covered by
 the prepare/refresh regression. No production-boundary E2E status changes.
+
+`tests.unit.test_health_http` and the health assertions in
+`tests.unit.test_openapi_validation` (**unit**, G4.3) cover exact read-only
+liveness, readiness and dependency routes; atomic injected snapshots; safe
+structured diagnostics; bounded sync/async probes; timeout, exception and
+overload behavior; retained worker slots; bounded cleanup; and representative
+OpenAPI response validation. **15 tests passed in 0.144 seconds** with warnings
+treated as errors, and service/test/tool compilation passed. The health boundary
+is not wired to production bootstrap state and does not prove actual GPU,
+artifact, adapter or measured-profile readiness.
 
 - **G1.1 — Durable asynchronous work (`e2e`):** Accepted work in the SQLite
   QueueStore survives real scheduler or consumer restart and reaches an

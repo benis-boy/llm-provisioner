@@ -1,4 +1,4 @@
-"""Fail-closed Linux NVML/procfs ownership evidence for one GPU supervisor."""
+"""Positive Linux NVML/procfs ownership evidence for one GPU supervisor."""
 from __future__ import annotations
 
 import asyncio
@@ -11,6 +11,14 @@ from typing import Any
 
 class GPUProofError(RuntimeError):
     """GPU or process ownership could not be proved."""
+
+
+class _ProcessUnconnected(Exception):
+    """A non-supervisor NVML PID could not be connected to our supervisor."""
+
+
+class _SupervisorUnconnected(GPUProofError):
+    """The captured supervisor could not be re-read during an ancestry fence."""
 
 
 @dataclass(frozen=True)
@@ -32,6 +40,10 @@ class _ProcessRecord:
     parent: int
 
 
+class _ForeignProcess(Exception):
+    """A readable process was proved not to belong to the supervisor."""
+
+
 _NVML_LOCK = threading.RLock()
 _UUID = re.compile(r"^GPU-[A-Za-z0-9-]+$")
 _COMPUTE_APIS = ("nvmlDeviceGetComputeRunningProcesses_v3",
@@ -40,9 +52,7 @@ _COMPUTE_APIS = ("nvmlDeviceGetComputeRunningProcesses_v3",
 _GRAPHICS_APIS = ("nvmlDeviceGetGraphicsRunningProcesses_v3",
                   "nvmlDeviceGetGraphicsRunningProcesses_v2",
                   "nvmlDeviceGetGraphicsRunningProcesses_v1",
-                  "nvmlDeviceGetGraphicsRunningProcesses")
-
-
+                   "nvmlDeviceGetGraphicsRunningProcesses")
 def _uuid(value: Any) -> str:
     if isinstance(value, bytes):
         try:
@@ -85,6 +95,9 @@ class LinuxGPUProof:
         self.supervisor_pid, self.proc_root, self._nvml = supervisor_pid, root, nvml
         self._supervisor = _supervisor
         self._baseline_empty = _baseline_empty
+        self._baseline_process_count = 0
+        self._owned_identities: set[ProcessIdentity] = set()
+        self._state_lock = threading.RLock()
 
     @classmethod
     def capture(cls, target_uuid: str, supervisor_pid: int,
@@ -104,14 +117,24 @@ class LinuxGPUProof:
                 raise GPUProofError("pynvml is required to capture GPU proof") from exc
         # Constructor validation is deliberately performed before any proc read.
         proof = cls(target_uuid, supervisor_pid, proc_root, backend)
-        supervisor = proof._read_record(supervisor_pid).identity
-        with proof._nvml_session() as device:
-            proof._check_device(device)
-            if proof._process_pids(device):
-                raise GPUProofError("GPU baseline is not empty")
-        proof._assert_identity(supervisor)
-        proof._supervisor = supervisor
-        proof._baseline_empty = True
+        with proof._state_lock:
+            # Install the exact supervisor identity before classifying a shared
+            # baseline: _owned() must fence every ancestry observation against
+            # that identity. Keep it installed through the final recheck so a
+            # PID reuse cannot turn a baseline classification into a capture.
+            supervisor = proof._read_supervisor_record(supervisor_pid).identity
+            proof._supervisor = supervisor
+            with proof._nvml_session() as device:
+                proof._check_device(device)
+                proof._assert_identity(supervisor)
+                baseline = proof._process_pids(device)
+                owned = proof._classify_pids(baseline)
+                if owned:
+                    raise GPUProofError("service-owned runner is already using the GPU")
+                proof._assert_identity(supervisor)
+                proof._baseline_process_count = min(len(baseline), 1024)
+            proof._assert_identity(supervisor)
+            proof._baseline_empty = True
         return proof
 
     class _Session:
@@ -203,8 +226,10 @@ class LinuxGPUProof:
         try:
             with (self.proc_root / str(pid) / "stat").open("rb") as stream:
                 raw = stream.read(4097)
+        except FileNotFoundError as exc:
+            raise _ProcessUnconnected from exc
         except OSError as exc:
-            raise GPUProofError("process identity is unreadable") from exc
+            raise _ProcessUnconnected from exc
         if len(raw) > 4096:
             raise GPUProofError("process stat record exceeds bound")
         try:
@@ -221,9 +246,22 @@ class LinuxGPUProof:
             raise GPUProofError("invalid or dead process stat")
         return _ProcessRecord(ProcessIdentity(pid, start), parent)
 
+    def _read_supervisor_record(self, pid: int) -> _ProcessRecord:
+        """Read the supervisor through the public proof-error contract."""
+        try:
+            return self._read_record(pid)
+        except _ProcessUnconnected as exc:
+            raise GPUProofError("supervisor process record is unavailable") from exc
+
     def _assert_identity(self, expected: ProcessIdentity) -> None:
-        if self._read_record(expected.pid).identity != expected:
+        if self._read_supervisor_record(expected.pid).identity != expected:
             raise GPUProofError("supervisor PID was reused or exited")
+
+    def _candidate_record(self, pid: int) -> _ProcessRecord:
+        try:
+            return self._read_record(pid)
+        except (GPUProofError, _ProcessUnconnected) as exc:
+            raise _ProcessUnconnected from exc
 
     def _owned(self, leaf: int) -> ProcessIdentity:
         supervisor = self._supervisor
@@ -235,21 +273,69 @@ class LinuxGPUProof:
             if current in seen:
                 raise GPUProofError("process ancestry cycle")
             seen.add(current)
-            record = self._read_record(current)
+            record = self._candidate_record(current)
             first.append(record)
             if record.parent == self.supervisor_pid:
                 break
-            if record.parent <= 0:
-                raise GPUProofError("runner is not a supervisor descendant")
+            if record.parent <= 1:
+                # A foreign result is useful only if the complete path which
+                # led to it stayed foreign while it was being observed.  Do
+                # not return at the ancestry root: a reused PID, a changed
+                # parent, or a supervisor transition could otherwise make a
+                # resident service descendant look foreign.
+                try:
+                    self._fence_ancestry(supervisor, first)
+                except _ProcessUnconnected as exc:
+                    raise _ProcessUnconnected from exc
+                raise _ForeignProcess
             current = record.parent
         else:
             raise GPUProofError("process ancestry exceeds depth bound")
-        if self._read_record(self.supervisor_pid).identity != supervisor:
-            raise GPUProofError("supervisor PID was reused or exited")
-        for record in first:
-            if self._read_record(record.identity.pid) != record:
-                raise GPUProofError("process ancestry changed during observation")
+        self._fence_ancestry(supervisor, first)
         return first[0].identity
+
+    def _fence_ancestry(self, supervisor: ProcessIdentity,
+                        records: list[_ProcessRecord]) -> None:
+        """Confirm the supervisor and every sampled ancestry record.
+
+        Foreign classification needs the same snapshot fence as owned
+        classification.  In particular, never let an ancestry root be the
+        last read before declaring a process irrelevant to cleanup.
+        """
+        try:
+            current_supervisor = self._read_record(self.supervisor_pid)
+        except _ProcessUnconnected as exc:
+            # Unlike a candidate record, uncertainty about the captured
+            # supervisor invalidates the proof even if a later fence succeeds.
+            raise _SupervisorUnconnected from exc
+        if current_supervisor.identity != supervisor:
+            raise GPUProofError("supervisor PID was reused or exited")
+        for record in records:
+            try:
+                current = self._read_record(record.identity.pid)
+            except (GPUProofError, _ProcessUnconnected) as exc:
+                raise _ProcessUnconnected from exc
+            if current != record:
+                raise GPUProofError("process ancestry changed during observation")
+
+    def _owned_or_foreign(self, leaf: int) -> ProcessIdentity | None:
+        if leaf == self.supervisor_pid:
+            return None
+        try:
+            return self._owned(leaf)
+        except (_ForeignProcess, _ProcessUnconnected):
+            return None
+
+    def _classify_pids(self, pids: set[int]) -> set[ProcessIdentity]:
+        """Return only positively proven owned identities; unknown is ignored."""
+        owned: set[ProcessIdentity] = set()
+        for pid in pids:
+            if pid == self.supervisor_pid:
+                raise GPUProofError("supervisor is using the GPU")
+            identity = self._owned_or_foreign(pid)
+            if identity is not None:
+                owned.add(identity)
+        return owned
 
     def _identity_sync(self) -> str:
         if self._supervisor is None:
@@ -267,31 +353,62 @@ class LinuxGPUProof:
             raise GPUProofError("GPU proof was not captured")
         return self._supervisor
 
-    def _residency_sync(self) -> ResidencyEvidence:
+    @property
+    def baseline_process_count(self) -> int:
+        """A bounded diagnostic count; baseline PIDs are intentionally not exposed."""
         if self._supervisor is None or not self._baseline_empty:
             raise GPUProofError("GPU proof was not captured")
-        self._assert_identity(self._supervisor)
-        with self._nvml_session() as device:
-            self._check_device(device)
-            first = self._process_pids(device)
-            if not first:
-                raise GPUProofError("GPU has no resident runner")
-            runners = tuple(sorted((self._owned(pid) for pid in first), key=lambda x: x.pid))
-            second = self._process_pids(device)
-        if second != first:
-            raise GPUProofError("GPU process set changed during ownership proof")
-        self._assert_identity(self._supervisor)
-        return ResidencyEvidence(self.target_uuid, self._supervisor, runners)
+        return self._baseline_process_count
+
+    def _residency_sync(self) -> ResidencyEvidence:
+        with self._state_lock:
+            if self._supervisor is None or not self._baseline_empty:
+                raise GPUProofError("GPU proof was not captured")
+            self._assert_identity(self._supervisor)
+            with self._nvml_session() as device:
+                self._check_device(device)
+                first_owned = self._classify_pids(self._process_pids(device))
+                runners = tuple(sorted(first_owned, key=lambda x: x.pid))
+                if not runners:
+                    raise GPUProofError("GPU has no resident runner")
+                second_owned = self._classify_pids(self._process_pids(device))
+                if second_owned != first_owned:
+                    raise GPUProofError("owned GPU process set changed during ownership proof")
+            self._assert_identity(self._supervisor)
+            self._owned_identities.update(runners)
+            return ResidencyEvidence(self.target_uuid, self._supervisor, runners)
 
     def _cleanup_sync(self) -> bool:
-        if self._supervisor is None or not self._baseline_empty:
-            return False
-        self._assert_identity(self._supervisor)
-        with self._nvml_session() as device:
-            self._check_device(device)
-            empty = not self._process_pids(device)
-        self._assert_identity(self._supervisor)
-        return empty
+        with self._state_lock:
+            if self._supervisor is None or not self._baseline_empty:
+                return False
+            try:
+                self._assert_identity(self._supervisor)
+            except (GPUProofError, _ProcessUnconnected):
+                # CleanupProbe is a boolean callback. A missing,
+                # unreadable, malformed, or reused supervisor is an inability
+                # to prove cleanup, never an exceptional positive result.
+                return False
+            try:
+                with self._nvml_session() as device:
+                    self._check_device(device)
+                    current = self._process_pids(device)
+                    first_owned = self._classify_pids(current)
+                    second = self._process_pids(device)
+                    second_owned = self._classify_pids(second)
+                    if first_owned or second_owned:
+                        return False
+            except GPUProofError:
+                return False
+            try:
+                # Fence the clean NVML sample as well as the initial one. In
+                # particular, an empty/foreign-only sample after supervisor PID
+                # reuse must not be reported as service cleanup.
+                self._assert_identity(self._supervisor)
+            except (GPUProofError, _ProcessUnconnected):
+                return False
+            # Both observations completed with no positively-owned runner.
+            return True
 
     async def identity(self) -> str:
         return await asyncio.to_thread(self._identity_sync)

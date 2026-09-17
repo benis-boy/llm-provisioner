@@ -45,6 +45,7 @@ class SmolLMProviderTests(unittest.IsolatedAsyncioTestCase):
         self.unload_attempts = 0
         self.foreign = False
         self.ps_calls = 0
+        self.ps_models = None
         self.block_started = asyncio.Event()
         self.block_release = asyncio.Event()
         async def generate(request):
@@ -79,6 +80,11 @@ class SmolLMProviderTests(unittest.IsolatedAsyncioTestCase):
             return web.json_response({"response": "ok", "done": True, "prompt_eval_count": count})
         async def ps(request):
             self.ps_calls += 1
+            if self.ps_models is not None:
+                models = self.ps_models[0]
+                if len(self.ps_models) > 1:
+                    self.ps_models.pop(0)
+                return web.json_response({"models": models})
             if self.foreign:
                 return web.json_response({"models": [{"name": "foreign:latest", "size": 1, "size_vram": 1}]})
             if self.unloaded:
@@ -133,14 +139,18 @@ class SmolLMProviderTests(unittest.IsolatedAsyncioTestCase):
                     await provider.load(_profile("0" * 64, "1" * 64))
             create.assert_not_awaited()
 
-    async def test_redirect_and_false_cleanup_fail_closed(self):
+    async def test_cleanup_verification_is_model_state_only_and_does_not_probe_gpu(self):
+        cleanup = mock.Mock(return_value=False)
         config = SmolLMProviderConfig(Path("/tmp"), "0" * 64, "1" * 64, "GPU-1", "runtime", "adapter",
-            gpu_proof=GPUProof(lambda: "GPU-1", lambda: False))
+            gpu_proof=GPUProof(lambda: "GPU-1", cleanup))
         provider = SmolLMProvider(config)
         provider._cleanup_verified = True
+        self.assertTrue(await provider.verify_cleanup())
+        cleanup.assert_not_called()
+        provider._model = "stale"
         self.assertFalse(await provider.verify_cleanup())
 
-    async def test_never_loaded_unload_proves_absence_and_rejects_foreign_or_false_cleanup(self):
+    async def test_model_state_cleanup_proves_absence_and_rejects_foreign_state(self):
         config = SmolLMProviderConfig(Path("/tmp"), "0" * 64, "1" * 64, "GPU-1", "runtime", "adapter",
             gpu_proof=_gpu_proof(), ollama_port=self.port)
         provider = SmolLMProvider(config)
@@ -153,9 +163,65 @@ class SmolLMProviderTests(unittest.IsolatedAsyncioTestCase):
         self.foreign = True
         with self.assertRaises(RuntimeError): await foreign.unload()
         self.foreign = False
-        false_probe = SmolLMProvider(replace(config, gpu_proof=_gpu_proof(cleanup=False)))
+        false_cleanup = mock.Mock(return_value=False)
+        false_probe = SmolLMProvider(replace(
+            config, gpu_proof=GPUProof(lambda: "GPU-1", false_cleanup)))
         await false_probe.unload()
-        self.assertFalse(await false_probe.verify_cleanup())
+        self.assertTrue(await false_probe.verify_cleanup())
+        false_cleanup.assert_not_called()
+
+    async def test_absence_check_returns_without_sleep_for_empty_models(self):
+        provider, tmp = await self._loaded_provider()
+        try:
+            self.ps_models = [[]]
+            sleeps = []
+            provider._absence_sleep = lambda delay: sleeps.append(delay)
+            await provider._check_absent()
+            self.assertEqual([], sleeps)
+        finally:
+            self.ps_models = None
+            await provider.unload()
+
+    async def test_absence_check_polls_until_models_are_gone(self):
+        provider, tmp = await self._loaded_provider()
+        try:
+            resident = [{"name": "smollm-test:latest", "size": 2, "size_vram": 2}]
+            self.ps_models = [resident, []]
+            now = [0.0]
+            sleeps = []
+            provider._absence_clock = lambda: now[0]
+            async def sleep(delay):
+                sleeps.append(delay)
+                now[0] += delay
+            provider._absence_sleep = sleep
+            await provider._check_absent()
+            self.assertEqual([0.2], sleeps)
+            self.assertEqual(2, self.ps_calls)
+        finally:
+            self.ps_models = None
+            await provider.unload()
+
+    async def test_absence_check_bounded_failure_for_persistent_models(self):
+        provider, tmp = await self._loaded_provider()
+        try:
+            resident = [{"name": "smollm-test:latest", "size": 2, "size_vram": 2}]
+            self.ps_models = [resident]
+            now = [0.0]
+            sleeps = []
+            provider._absence_clock = lambda: now[0]
+            async def sleep(delay):
+                sleeps.append(delay)
+                now[0] += delay
+            provider._absence_sleep = sleep
+            with self.assertRaisesRegex(RuntimeError, "Ollama still has resident models"):
+                await provider._check_absent()
+            self.assertEqual(5.0, now[0])
+            self.assertEqual(25, len(sleeps))
+        finally:
+            # The test intentionally leaves the daemon resident; make the
+            # provider state safe for the fixture teardown without polling.
+            await provider._session.close()
+            provider._session = None
 
     async def test_readiness_requires_exact_typed_supervisor_owned_residency(self):
         provider, tmp = await self._loaded_provider()
@@ -359,6 +425,23 @@ class SmolLMProviderTests(unittest.IsolatedAsyncioTestCase):
             with mock.patch.object(retry, "_prove_artifact", return_value=({}, Path(root), {})):
                 with self.assertRaises(RuntimeError): await retry._run_create("fail", Path(root) / "x.gguf")
                 await retry._run_create("ok", Path(root) / "x.gguf")
+
+    async def test_create_cli_receives_configured_home_without_ambient_environment(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            home = root / "private-home"
+            observed = root / "home.txt"
+            script = root / "ollama_stub.py"
+            script.write_text("#!/usr/bin/env python3\n" + textwrap.dedent(f"""
+                import os
+                from pathlib import Path
+                Path({str(observed)!r}).write_text(os.environ.get("HOME", "missing"))
+            """), encoding="ascii")
+            script.chmod(0o755)
+            config = SmolLMProviderConfig(root, "0" * 64, "1" * 64, "GPU-1", "runtime", "adapter",
+                gpu_proof=_gpu_proof(), ollama_binary=str(script), ollama_home=home)
+            await SmolLMProvider(config)._run_create("ok", root / "x.gguf")
+            self.assertEqual(observed.read_text(), str(home))
 
     async def test_real_cli_timeout_and_output_overflow_are_bounded(self):
         with tempfile.TemporaryDirectory() as root:

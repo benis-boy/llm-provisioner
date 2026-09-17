@@ -100,6 +100,253 @@ class GPUProofTests(unittest.IsolatedAsyncioTestCase):
         self.nvml.compute = []
         self.assertTrue(await self.proof.cleanup())
 
+    async def test_shared_gpu_foreign_processes_are_filtered_and_churn_is_tolerated(self):
+        write_stat(self.root, 20, 1)
+        self.nvml.compute = [20]
+        # Re-capture with a readable foreign baseline.
+        proof = LinuxGPUProof.capture("GPU-test", 10, self.root, self.nvml)
+        self.assertEqual(1, proof.baseline_process_count)
+        write_stat(self.root, 11, 10)
+        write_stat(self.root, 12, 11)
+        self.nvml.compute = [12, 30]
+        write_stat(self.root, 30, 1)
+        evidence = await proof.residency()
+        self.assertEqual((12,), tuple(item.pid for item in evidence.runners))
+        self.nvml.compute = [12]
+        self.assertFalse(await proof.cleanup())
+        self.nvml.compute = [30]
+        self.assertTrue(await proof.cleanup())
+
+    async def test_supervisor_nvml_pid_is_not_a_runner_and_blocks_cleanup(self):
+        self.nvml.compute = [10]
+        with self.assertRaises(GPUProofError):
+            await self.proof.residency()
+        self.assertFalse(await self.proof.cleanup())
+
+    def test_capture_rejects_a_supervisor_gpu_baseline_pid(self):
+        self.nvml.compute = [10]
+        with self.assertRaises(GPUProofError):
+            LinuxGPUProof.capture("GPU-test", 10, self.root, self.nvml)
+
+    def test_capture_reports_missing_supervisor_as_public_error(self):
+        (self.root / "10" / "stat").unlink()
+        with self.assertRaises(GPUProofError):
+            LinuxGPUProof.capture("GPU-test", 10, self.root, self.nvml)
+
+    def test_capture_reports_unreadable_supervisor_as_public_error(self):
+        (self.root / "10" / "stat").unlink()
+        (self.root / "10" / "stat").mkdir()
+        with self.assertRaises(GPUProofError):
+            LinuxGPUProof.capture("GPU-test", 10, self.root, self.nvml)
+
+    def test_capture_accepts_persistent_absent_graphics_pid(self):
+        self.nvml.graphics = [30]
+        proof = LinuxGPUProof.capture("GPU-test", 10, self.root, self.nvml)
+        self.assertEqual(1, proof.baseline_process_count)
+
+    def test_stable_readable_foreign_baseline_does_not_delay(self):
+        write_stat(self.root, 20, 1)
+        self.nvml.compute = [20]
+        LinuxGPUProof.capture("GPU-test", 10, self.root, self.nvml)
+
+    async def test_stable_readable_foreign_residency_does_not_delay(self):
+        write_stat(self.root, 11, 10)
+        write_stat(self.root, 20, 1)
+        self.nvml.compute = [11, 20]
+        evidence = await self.proof.residency()
+        self.assertEqual((11,), tuple(item.pid for item in evidence.runners))
+
+    async def test_residency_ignores_absent_unreadable_and_malformed_extra_pids(self):
+        write_stat(self.root, 11, 10)
+        (self.root / "31").mkdir()
+        (self.root / "31" / "stat").write_bytes(b"bad")
+        self.nvml.compute = [11, 30, 31, 32]
+        evidence = await self.proof.residency()
+        self.assertEqual((11,), tuple(item.pid for item in evidence.runners))
+
+    async def test_cleanup_true_with_unknown_only_pid(self):
+        self.nvml.compute = [30]
+        self.assertTrue(await self.proof.cleanup())
+
+    async def test_cleanup_false_with_proven_runner(self):
+        write_stat(self.root, 11, 10)
+        self.nvml.compute = [11]
+        self.assertFalse(await self.proof.cleanup())
+
+    async def test_residency_rejects_unknown_to_owned_transition(self):
+        write_stat(self.root, 11, 10)
+        samples = iter(([Process(11), Process(30)], [Process(11), Process(30)]))
+        # The extra PID is initially absent, then becomes our strict descendant.
+        def compute(device):
+            values = next(samples)
+            if values[0].pid == 11 and len(values) == 2 and not hasattr(compute, "changed"):
+                compute.changed = True
+                return values
+            write_stat(self.root, 30, 10)
+            return values
+        with mock.patch.object(self.nvml, "nvmlDeviceGetComputeRunningProcesses_v3",
+                               side_effect=compute):
+            with self.assertRaisesRegex(GPUProofError, "owned GPU process set changed"):
+                await self.proof.residency()
+
+    async def test_supervisor_unreadable_or_malformed_does_not_mean_gone(self):
+        (self.root / "10" / "stat").unlink()
+        self.assertFalse(await self.proof.cleanup())
+        write_stat(self.root, 10, 0)
+        (self.root / "10" / "stat").write_bytes(b"malformed")
+        self.assertFalse(await self.proof.cleanup())
+
+    async def test_identity_reports_missing_supervisor_as_public_error(self):
+        (self.root / "10" / "stat").unlink()
+        with self.assertRaises(GPUProofError):
+            await self.proof.identity()
+
+    async def test_identity_reports_unreadable_supervisor_as_public_error(self):
+        (self.root / "10" / "stat").unlink()
+        (self.root / "10" / "stat").mkdir()
+        with self.assertRaises(GPUProofError):
+            await self.proof.identity()
+
+    async def test_residency_reports_missing_supervisor_as_public_error(self):
+        (self.root / "10" / "stat").unlink()
+        with self.assertRaises(GPUProofError):
+            await self.proof.residency()
+
+    async def test_residency_reports_unreadable_supervisor_as_public_error(self):
+        (self.root / "10" / "stat").unlink()
+        (self.root / "10" / "stat").mkdir()
+        with self.assertRaises(GPUProofError):
+            await self.proof.residency()
+
+    async def test_cleanup_revalidates_supervisor_after_clean_nvml_sample(self):
+        with mock.patch.object(self.proof, "_assert_identity",
+                               side_effect=(None, GPUProofError("reused"))):
+            self.assertFalse(await self.proof.cleanup())
+
+    async def test_supervisor_loss_fails_closed_for_unrecorded_current_pid(self):
+        write_stat(self.root, 11, 10)
+        self.nvml.compute = [11]
+        await self.proof.residency()
+        (self.root / "10" / "stat").unlink()
+        write_stat(self.root, 30, 1)
+        self.nvml.compute = [30]
+        self.assertFalse(await self.proof.cleanup())
+
+    async def test_residency_tolerates_new_foreign_pid_that_disappears(self):
+        write_stat(self.root, 11, 10)
+        write_stat(self.root, 20, 1)
+        self.nvml.compute = [11, 20]
+        calls = 0
+        def compute(device):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                (self.root / "20" / "stat").unlink()
+                return [Process(11), Process(20)]
+            return [Process(11)]
+        with mock.patch.object(self.nvml, "nvmlDeviceGetComputeRunningProcesses_v3",
+                               side_effect=compute):
+            evidence = await self.proof.residency()
+        self.assertEqual((11,), tuple(item.pid for item in evidence.runners))
+
+    async def test_foreign_numeric_churn_does_not_change_owned_residency(self):
+        write_stat(self.root, 11, 10)
+        write_stat(self.root, 20, 1)
+        write_stat(self.root, 30, 1)
+        samples = iter(([Process(11), Process(20)], [Process(11), Process(30)]))
+        with mock.patch.object(self.nvml, "nvmlDeviceGetComputeRunningProcesses_v3",
+                               side_effect=lambda device: next(samples)):
+            evidence = await self.proof.residency()
+        self.assertEqual((11,), tuple(item.pid for item in evidence.runners))
+
+    async def test_residency_rejects_a_previously_owned_pid_that_disappears(self):
+        write_stat(self.root, 11, 10)
+        self.nvml.compute = [11]
+        await self.proof.residency()
+        (self.root / "11" / "stat").unlink()
+        with self.assertRaises(GPUProofError):
+            await self.proof.residency()
+
+    async def test_cleanup_tolerates_new_foreign_pid_that_disappears(self):
+        write_stat(self.root, 20, 1)
+        calls = 0
+        def compute(device):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                (self.root / "20" / "stat").unlink()
+                return [Process(20)]
+            return []
+        with mock.patch.object(self.nvml, "nvmlDeviceGetComputeRunningProcesses_v3",
+                               side_effect=compute):
+            self.assertTrue(await self.proof.cleanup())
+
+    async def test_foreign_numeric_churn_does_not_block_cleanup(self):
+        write_stat(self.root, 20, 1)
+        write_stat(self.root, 30, 1)
+        samples = iter(([Process(20)], [Process(30)]))
+        with mock.patch.object(self.nvml, "nvmlDeviceGetComputeRunningProcesses_v3",
+                               side_effect=lambda device: next(samples)):
+            self.assertTrue(await self.proof.cleanup())
+
+    async def test_foreign_leaf_start_time_reuse_fails_cleanup_closed(self):
+        write_stat(self.root, 20, 1, 1)
+        self.nvml.compute = [20]
+        original = self.proof._read_record
+        leaf_reads = 0
+
+        def reread_reused_leaf(pid):
+            nonlocal leaf_reads
+            if pid == 20:
+                leaf_reads += 1
+                if leaf_reads == 2:
+                    write_stat(self.root, 20, 1, 99)
+            return original(pid)
+
+        with mock.patch.object(self.proof, "_read_record", side_effect=reread_reused_leaf):
+            self.assertFalse(await self.proof.cleanup())
+
+    async def test_foreign_ancestry_mutation_into_supervisor_descendant_fails_cleanup_closed(self):
+        write_stat(self.root, 20, 21, 2)
+        write_stat(self.root, 21, 1, 3)
+        self.nvml.compute = [20]
+        original = self.proof._read_record
+        ancestor_reads = 0
+
+        def reread_mutated_ancestor(pid):
+            nonlocal ancestor_reads
+            if pid == 21:
+                ancestor_reads += 1
+                if ancestor_reads == 2:
+                    write_stat(self.root, 21, 10, 3)
+            return original(pid)
+
+        with mock.patch.object(self.proof, "_read_record", side_effect=reread_mutated_ancestor):
+            self.assertFalse(await self.proof.cleanup())
+
+    async def test_supervisor_unreadable_during_foreign_fence_fails_cleanup_closed(self):
+        write_stat(self.root, 20, 1)
+        self.nvml.compute = [20]
+        original = self.proof._read_record
+        supervisor_reads = 0
+
+        def unreadable_supervisor_during_fence(pid):
+            nonlocal supervisor_reads
+            if pid == 10:
+                supervisor_reads += 1
+                if supervisor_reads == 2:
+                    stat = self.root / "10" / "stat"
+                    stat.unlink()
+                    try:
+                        return original(pid)
+                    finally:
+                        write_stat(self.root, 10, 0, 42)
+            return original(pid)
+
+        with mock.patch.object(self.proof, "_read_record",
+                               side_effect=unreadable_supervisor_during_fence):
+            self.assertFalse(await self.proof.cleanup())
+
     def test_constructor_and_stat_fail_closed(self):
         with self.assertRaises(ValueError): LinuxGPUProof("GPU-test", 0, self.root, self.nvml)
         with self.assertRaises(ValueError): LinuxGPUProof("GPU-test", 10, Path("relative"), self.nvml)
@@ -156,3 +403,18 @@ class GPUProofTests(unittest.IsolatedAsyncioTestCase):
         write_stat(self.root, 30, 10)
         self.nvml.compute = [95]
         with self.assertRaises(GPUProofError): await self.proof.residency()
+
+    async def test_residency_reclassifies_an_unchanged_pid_set(self):
+        write_stat(self.root, 11, 10, 2)
+        self.nvml.compute = [11]
+        original = self.proof._process_pids
+        calls = 0
+        def same_pid_set(device):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                write_stat(self.root, 11, 10, 99)
+            return original(device)
+        with mock.patch.object(self.proof, "_process_pids", side_effect=same_pid_set):
+            with self.assertRaises(GPUProofError):
+                await self.proof.residency()

@@ -55,9 +55,10 @@ while allowing dependent work to be submitted before it is ready.
 **partial —** The available GPU remains productively supplied while model
 residency, concurrency, and buffering stay within proved operational limits.
 
-- **partial — G4.1 — Safe exclusive model service:** The GPU serves SmolLM via
-  Ollama, CoEdIT via Transformers/PyTorch, or GECToR via gector under one fenced
-  residency authority, without stale execution crossing a model switch.
+- **partial — G4.1 — Safe owned model service:** On a shared physical GPU,
+  SmolLM via Ollama, CoEdIT via Transformers/PyTorch, or GECToR via gector runs
+  under one fenced service-residency authority without claiming control of
+  foreign workloads or allowing stale execution to cross a model switch.
 - **partial — G4.2 — Bounded useful admission:** Each resident model accepts no
   more than its measured throughput-optimal parallelism plus a bounded input
   buffer; competing schedulers are rejected so the one GPU maximizes throughput
@@ -92,10 +93,34 @@ again with independent bounded ASCII input evidence and exact raw SmolLM framing
 An installable SmolLM adapter now uses bounded local Ollama import, exact raw
 framing, typed supervisor/runner residency evidence and cleanup checks. Linux
 NVML/procfs proof and initial RM failure cleanup have local regression coverage;
-real host-PID namespace wiring and real-adapter GPU execution remain unproved.
+real-adapter GPU execution remains unproved.
 A network-disabled actual-SmolLM-adapter candidate check now exists, but its
 real run failed closed with `procfs_missing` at `/host/proc/self/stat`; operator
-repair of authoritative host procfs availability is required before further GPU
-verification. Local harness tests do not establish that namespace boundary.
-Capacity-measurement and health HTTP bindings, complete production adapters/image, actual measured capacity profiles and
+repair of authoritative host procfs availability was required. A retry after adding the devcontainer procfs mount failed with the
+same `procfs_missing` before readiness; its separate adapter container was removed
+and verified absent. The devcontainer mount alone does not establish the required
+daemon-host bind or NVML alignment. The harness now uses authoritative `/proc`
+with `--pid=host`, and the ownership proof accepts changing provably foreign
+workloads while returning only strict supervisor descendants. Seventy-four
+focused tests pass. The latest actual run advanced through the old procfs mount
+failure but could not classify at least one current NVML PID, so it failed closed
+before readiness. Bounded lag retries, complete confirmation classification and
+stable foreign-ancestry fencing now pass 83 focused tests. A rebuilt actual run
+still failed closed; a minimal diagnostic isolated one persistent graphics NVML
+PID absent from Linux procfs while Ollama ran. Exhaustive foreign correlation was
+later rejected as beyond G4.1: unconnected non-supervisor NVML PIDs are now
+ignored and never controlled, while residency still requires a stable nonempty
+set of positively proved supervisor descendants. Eighty-eight focused tests pass.
+Real inference, residency and cleanup remain unproved pending a new actual run.
+The new network-disabled actual run passed with real SmolLM/Ollama inference,
+one positively proved supervisor-descendant GPU runner, old-model absence after
+unload, stale-session rejection, and identity-fenced daemon-group/container
+cleanup. Two baseline NVML PIDs remained unrelated/unknown and untouched.
+Focused verification passes 94 tests. G4.1 now has candidate production-boundary
+evidence for this SmolLM path; CoEdIT, GECToR, full switching/cancellation, and
+production deployment coverage remain incomplete.
+An unwired read-only health HTTP precursor now has local contract evidence for
+bounded probes, safe diagnostics and fail-closed injected readiness snapshots;
+it does not establish production bootstrap or GPU readiness. Capacity-measurement
+HTTP bindings, complete production adapters/image, actual measured capacity profiles and
 qualifying production-boundary E2E remain absent. All leaves remain partial.
