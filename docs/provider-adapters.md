@@ -1,5 +1,19 @@
 # Provider adapters
 
+## CoEdIT
+
+CoEdIT uses one fresh, process-group-owned offline Python worker per load. The
+parent imports no Torch/CUDA and requires a captured Linux GPU proof for the
+parent supervisor before the child is launched. The strict request is
+`{"instruction": string, "texts": [string]}` with one configured native batch
+item, and the aligned result is `{"texts": [string]}`. Tokenization enables
+special tokens and disables truncation before admission. The child uses local
+Transformers, explicit safetensors, no remote code, configured dtype and
+generation parameters, and `cuda:0`. Framed RPC, stderr, EOF, malformed
+frames, timeouts, child death, PID reuse, and uncertain process-group cleanup
+fail closed. Only serial execution is supported; no measured capacity is
+claimed.
+
 The Phase 4 SmolLM adapter is intentionally a client of the fixed supervisor-owned
 loopback Ollama daemon. It never starts Ollama, downloads a model, benchmarks, or
 selects a capacity profile. Startup verifies the operator-selected content-addressed
@@ -39,3 +53,28 @@ deployment seam. Only the explicitly unmeasured 512-token
 profile is accepted. Candidate aggregate identities and synthetic profiles are
 not production profile identities; the adapter does not claim arbitrary contexts
 or registry-origin provenance.
+
+## GECToR
+
+GECToR uses the common owned Python worker through the child command
+`services.llm.providers.gector_worker`; the parent imports no Torch or GECToR.
+Its selected offline manifest contains the exact GECToR file set, including
+`verb-form-vocab.txt`, and binds `model.safetensors` to the configured model
+digest. Loading is local-only, safetensors-only, no remote code, explicit
+float32 on `cuda:0`, and rejects missing, unexpected, or mismatched weights.
+The child supplies the reviewed DeBERTa-large configuration only to satisfy
+GECToR 1.2.0's upstream encoder lookup and restores its temporary patch.
+
+The sole supported bucket is native batch one, one iteration, exactly 128
+tokenizer subwords, float32, numeric JSON zero `keep_confidence` and
+`min_error_prob` (integer or float, never boolean or non-finite), with identity
+`gector:p1:tokens128:keep0:min0:iterations1:batch1:float32`. Requests contain
+exactly those five fields and must match the bucket. Tokenization disables
+truncation before execution and returns the exact `{"accepted": boolean}`
+validation result: an overlong input returns `false` so the parent rejects it
+without poisoning an otherwise healthy worker; tokenizer/runtime faults remain
+fatal. Loading sets `config.max_length=128` before model creation, overriding
+artifact or Transformers generation defaults while separately requiring the
+DeBERTa architecture's 512 positions. Execution checks the aligned output again. The response
+is `{"texts":[non-empty string]}`. No measured capacity is claimed; RM
+admission is bounded at p=1 with one buffered request.

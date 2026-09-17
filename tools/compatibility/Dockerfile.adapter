@@ -1,4 +1,4 @@
-# Offline-only image for the real services.llm.providers.SmolLMProvider check.
+# Offline-only image for real services.llm.providers adapter checks.
 ARG BASE_IMAGE=llm-compatibility-spike:candidate
 FROM ${BASE_IMAGE}
 ENV PYTHONUNBUFFERED=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
@@ -6,6 +6,9 @@ ENV PYTHONUNBUFFERED=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
 WORKDIR /opt/llm
 COPY services/ /opt/llm/services/
 COPY tools/compatibility/adapter_check.py /opt/llm/adapter_check.py
+COPY tools/compatibility/coedit_adapter_check.py /opt/llm/coedit_adapter_check.py
+COPY tools/compatibility/gector_adapter_check.py /opt/llm/gector_adapter_check.py
+COPY tools/compatibility/three_model_adapter_check.py /opt/llm/three_model_adapter_check.py
 COPY .compatibility/adapter-deps/wheelhouse/ /opt/llm/adapter-wheelhouse/
 COPY .compatibility/adapter-deps/requirements.lock /opt/llm/adapter-requirements.lock
 RUN /opt/venv/bin/python -m pip install --no-index --no-cache-dir --require-hashes \

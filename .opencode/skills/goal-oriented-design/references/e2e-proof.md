@@ -168,6 +168,123 @@ Additional latest evidence:
 
 ## Required production-boundary evidence
 
+### Lifecycle health and offline binding preflight (2026-09-17)
+
+G0/G4.1/G4.2/G4.3 **unit** evidence:
+
+- `tests.unit.test_resource_manager_health` and
+  `tests.integration.test_resource_manager_health_http`: real RM with fake owned
+  provider lifecycle gates, immutable observations, replacement revisions,
+  cancelled/timed-out cleanup and late completion, pre/post-probe dependency
+  conjunction, safe malformed/async snapshots and loopback readiness responses.
+  A successful probe cannot turn an unproved profile into readiness or carry
+  stale evidence across model replacement. Tests own tasks, gates and HTTP clients.
+- `tests.unit.test_bootstrap_bindings`: bounded immutable operator configuration,
+  actual tiny SPECS artifact-volume provisioning, actual SQLite measured-profile
+  registry with explicitly synthetic measurement fixtures, all three real unloaded
+  provider constructors, exact selectors/runtime/GPU/artifact identities, draft
+  rejection, missing database non-creation and diagnostic N>1 with p=1/m=1.
+  `test_resolve_rejects_later_profile_that_expands_pinned_capacity` specifically
+  substitutes a later registry result to prove per-resolution capacity fencing.
+  Runtime metadata fragments are bounded; GECToR version changes affect only its
+  identity, without importing ML runtimes. Tests own temporary volumes/databases.
+- `tests.unit.test_compatibility_inputs`: staged/refresh allowlists now include
+  the RM lifecycle state module and still import offline without Torch.
+
+Final `.venv/bin/python -W error -m unittest discover -v tests`:
+**427 passed in 50.677s**. `.venv/bin/python -m compileall -q services tests tools`
+and `git diff --check` passed. No new real GPU run was performed for these slices.
+
+Remaining proof gaps: continuously supervised production process/daemon startup,
+real dependency-state collection, actual measured capacity through that lifecycle,
+approved runtime/image inputs and scheduler-to-GPU deployment E2E. Preflight is a
+point-in-time artifact check under the documented immutable-volume precondition,
+not a permanent lease on a writable filesystem. Cancellation during artifact
+hashing and partial registry-failure handle cleanup lack dedicated fault-injection
+tests. All goals remain partial. See
+[health contract](../../../../docs/resource-manager-health.md) and
+[bootstrap contract](../../../../docs/offline-bootstrap.md).
+
+### Installed three-model switching candidate evidence (2026-09-17)
+
+G4.1/G4.2/G4.3 **unit**: `tests.unit.test_three_model_adapter_check` uses a real
+ResourceManager with fake provider/proof/daemon seams to cover replacement order,
+cleanup failure blocking the next load, stale controls, cancellation result
+fencing, actual provider configuration construction and flat-image imports.
+Fixtures own temporary artifacts and lifecycle resources.
+
+Actual **e2e candidate**:
+[`docs/three-model-adapter-gpu-check.md`](../../../../docs/three-model-adapter-gpu-check.md).
+One ResourceManager and parent-rooted GPU proof ran the installed providers
+SmolLM → CoEdIT → GECToR → SmolLM offline. Three replacements gated the next load
+on cleanup; four requests returned nonempty aligned results. Old submit/cancel
+controls were rejected. An additional CoEdIT execution-entry cancellation allowed
+the real delegate to finish but exposed no result. Final installed-provider,
+private daemon-group and GPU cleanup were positively checked; the named container
+was verified absent. This is not kernel interruption, a measured profile,
+production bootstrap or full scheduler-to-GPU proof. Goals remain partial.
+
+Image: `sha256:6785609cd5c7bfa792f9f839d481b4b0899ce8cdc96cd01ff33d40e7a8829fe2`.
+Combined selected manifest:
+`7abbd93bd3e4ec01ba01f8e4581821ae1d2f35cab720695c1309596df5614a19`.
+Focused command: `.venv/bin/python -W error -m unittest -v tests.unit.test_three_model_adapter_check tests.unit.test_adapter_check tests.unit.test_coedit_adapter_check tests.unit.test_gector_adapter_check tests.unit.test_resource_manager tests.unit.test_gpu_proof`
+— **91 passed in 5.597s**. Full `.venv/bin/python -W error -m unittest discover -v tests`
+— **396 passed in 48.669s**; compilation and whitespace checks passed.
+
+### GECToR isolated adapter candidate evidence (2026-09-17)
+
+G4.1/G4.2/G4.3 **unit** suites: `tests.unit.test_gector_provider`,
+`tests.unit.test_gector_worker`, `tests.unit.test_gector_adapter_check` and
+`tests.unit.test_python_worker`. Test-owned selected artifact volumes, mocked
+package loaders and framed subprocesses cover strict native parameters,
+package-style `$START`/split-word tokenization, 127/128/129-token boundaries,
+nonfatal expected overlength rejection, local loading/patch restoration and
+shared dispatch. These are not GPU or measured-capacity evidence.
+
+Actual **e2e candidate** commands and named-container cleanup ownership:
+[`docs/gector-adapter-gpu-check.md`](../../../../docs/gector-adapter-gpu-check.md).
+Normal and injected loss passed offline on the selected physical GPU. The
+normal run returned two aligned responses, rejected one overlong request and
+remained usable, proved one owned runner, rejected the stale token and cleaned
+up. Injected execution-entry process loss produced a failure with no result and
+proved cleanup. Both containers were verified absent. This is not kernel-entry
+or interruption proof, combined switching, production packaging or capacity
+measurement. All touched leaves remain partial.
+
+Image: `sha256:fed8212118fb3f4309826479cd4fddeaa83701428d1a9f1198b4054e56537389`.
+Selected manifest: `c3468ef6bbd5047d045b38800e33a3fd83f61a06277c9dd6bc8812e422610730`.
+Model: `f399c999ba19811601d685016fad4589fd397859b4ac1eca0c42fd8aeb0c9fe4`.
+Runtime: GECToR 1.2.0, Torch 2.7.1+cu128, Transformers 4.49.0, tokenizers 0.21.0,
+safetensors 0.5.3, CUDA 12.8. Full discovery passed **391 in 40.037s**;
+focused **53 in 2.808s**; compilation and `git diff --check` passed.
+
+### CoEdIT isolated adapter candidate evidence (2026-09-17)
+
+G4.1/G4.2/G4.3 **unit** suites: `tests.unit.test_coedit_provider`,
+`tests.unit.test_python_process`, `tests.unit.test_python_worker` and
+`tests.unit.test_coedit_adapter_check`. Tests own selected-artifact temporary
+volumes, fake GPU/runtime evidence and real framed subprocesses. They cover
+exact native batch-one buckets, token framing/output bounds, offline loader
+options, startup cancellation, orphan-group cleanup, PID reuse refusal,
+stderr/transport bounds and failed-readiness/cleanup fencing. Harness tests
+exercise real ResourceManager with fake providers, not real GPU evidence.
+
+Actual **e2e candidate** commands and cleanup ownership:
+[`docs/coedit-adapter-gpu-check.md`](../../../../docs/coedit-adapter-gpu-check.md).
+Both normal and injected process-loss runs passed with networking disabled,
+host-PID attestation and exact UUID selection. The normal run proved two aligned
+nonempty responses, one positively identified worker, stale-session rejection
+and owned GPU/process cleanup. Injected loss produced no result and cleanup
+passed. Both named containers were removed. Injection is execution-entry
+evidence, not proof of kernel entry or interruption. The profile is explicitly
+unmeasured p=1; no throughput capacity or production image claim is made.
+
+Image: `sha256:e6187ee93a7c9c9a913f983813c6d172eb09ccd8c0d8729f1e146ffef9394582`.
+Runtime: Torch 2.7.1+cu128, Transformers 4.49.0, tokenizers 0.21.0,
+safetensors 0.5.3, CUDA 12.8. Full discovery with warnings as errors passed
+**369 tests in 39.766s**; focused verification passed **36 in 2.791s**;
+compilation passed. All touched leaves remain partial.
+
 Real-adapter candidate check (2026-09-17, **blocked**, not qualifying E2E):
 `tools/compatibility/adapter_check.py` runs the actual SmolLM provider and Linux
 GPU proof with an explicitly unmeasured profile. Its separate hash-locked aiohttp

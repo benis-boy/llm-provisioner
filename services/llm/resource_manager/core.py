@@ -17,6 +17,7 @@ from services.llm.resource_manager.protocol import (
     Capacity, EventKind, Failure, ProgressEvent, Provider, ProviderResponse,
     ResourceManagerClient, SessionInfo, Submission,
 )
+from services.llm.resource_manager.state import ResourceManagerState
 
 
 class ResourceManagerError(RuntimeError):
@@ -84,6 +85,17 @@ class ResourceManager(ResourceManagerClient):
         # never race a timed-out load.
         self._lifecycle_tasks: set[asyncio.Task[object]] = set()
         self._cancelled_requests: set[tuple[str, str]] = set()
+        self._phase = "startup"
+
+    def snapshot(self) -> ResourceManagerState:
+        """Return the authoritative synchronous lifecycle observation.
+
+        Lifecycle mutations happen synchronously between awaits on the event
+        loop, so this read is atomic without exposing the manager's locks or
+        tasks.
+        """
+        return ResourceManagerState(self._phase, self._available,
+                                    self._session is not None, self._generation)
 
     @staticmethod
     def _key(value: str, name: str) -> None:
@@ -148,6 +160,7 @@ class ResourceManager(ResourceManagerClient):
                     # This is the synchronous residency fence, before cleanup awaits.
                     self._session = None
                     self._available = False
+                    self._phase = "unloading"
                     self._buffer.clear()
                     for work in self._active.values():
                         work.cancelled = True
@@ -163,6 +176,7 @@ class ResourceManager(ResourceManagerClient):
                 info = SessionInfo(scheduler_id, secrets.token_urlsafe(24), ModelId(model_id), generation)
                 self._session, self._profile, self._provider = info, profile, provider
                 self._available = False  # remains closed through validate/load/ready
+                self._phase = "loading"
             deadline = time.monotonic() + self.load_timeout
             try:
                 await self._bounded(provider.validate(profile), deadline)
@@ -173,6 +187,9 @@ class ResourceManager(ResourceManagerClient):
                     if self._session == info: self._available = False
                     if self._session == info:
                         self._session = self._profile = self._provider = None
+                        # Keep the lifecycle fenced until cleanup has proven
+                        # that a timed-out/failed load has released residency.
+                        self._phase = "unloading"
                         self._terminal.add(info.session_token)
                 # A failed lifecycle may already own a loaded daemon model.  The
                 # same bounded cleanup fence used for replacement is mandatory
@@ -188,6 +205,7 @@ class ResourceManager(ResourceManagerClient):
                 if self._session != info:
                     raise self._error("scheduler_superseded", "session was replaced")
                 self._available = True
+                self._phase = "stable"
                 self._generation = info.generation
                 self._records[info.session_token] = {}
                 self._request_attempts[info.session_token] = {}
@@ -235,11 +253,22 @@ class ResourceManager(ResourceManagerClient):
             async with self._lock:
                 self._active.clear()
                 self._available = True
+                if self._session is None:
+                    self._phase = "startup"
         except ResourceManagerError:
-            async with self._lock: self._available = False
+            async with self._lock:
+                self._available = False
+                self._phase = "cleanup_failed"
+            raise
+        except asyncio.CancelledError:
+            async with self._lock:
+                self._available = False
+                self._phase = "cleanup_failed"
             raise
         except Exception as exc:
-            async with self._lock: self._available = False
+            async with self._lock:
+                self._available = False
+                self._phase = "cleanup_failed"
             raise self._error("cleanup_failed", str(exc)) from exc
 
     def _emit_locked(self, session: SessionInfo, kind: EventKind, *, request_id=None,
@@ -455,6 +484,7 @@ class ResourceManager(ResourceManagerClient):
                     raise self._error("scheduler_superseded", "unknown or stale session")
                 session, provider = self._session, self._provider
                 self._session = None; self._available = False; self._buffer.clear()
+                self._phase = "unloading"
                 for work in self._active.values(): work.cancelled = True
                 self._terminal.add(session_token)
                 self._emit_locked(session, EventKind.SESSION_INVALIDATED,
@@ -464,6 +494,8 @@ class ResourceManager(ResourceManagerClient):
                 except Exception: pass
             async with self._lock:
                 self._provider = None; self._profile = None
+                if self._available:
+                    self._phase = "startup"
                 self._stop_records[idempotency_key] = (args, session_token)
 
     async def get_capacity(self, session_token: str) -> Capacity:

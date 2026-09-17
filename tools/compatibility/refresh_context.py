@@ -38,6 +38,7 @@ def main() -> int:
         "services/llm/resource_manager/__init__.py",
         "services/llm/resource_manager/contracts.py",
         "services/llm/resource_manager/protocol.py",
+        "services/llm/resource_manager/state.py",
         "services/llm/resource_manager/core.py",
     ):
         destination = output / relative

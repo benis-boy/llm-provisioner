@@ -4,13 +4,25 @@ Keep this package importable in the flat compatibility image: input-bound proof
 does not require the optional HTTP client used by the runtime adapter.
 """
 
-__all__ = ["SmolLMProvider", "SmolLMProviderConfig", "GPUProof", "ProcessIdentity", "ResidencyEvidence"]
+__all__ = ["SmolLMProvider", "SmolLMProviderConfig", "CoEdITProvider", "GECToRProvider", "PythonProviderConfig", "GECToRProviderConfig", "GPUProof", "ProcessIdentity", "ResidencyEvidence"]
 
 
 def __getattr__(name: str):
     if name == "SmolLMProvider":
         from .smollm import SmolLMProvider
         return SmolLMProvider
+    if name == "CoEdITProvider":
+        from .coedit import CoEdITProvider
+        return CoEdITProvider
+    if name == "GECToRProvider":
+        from .gector import GECToRProvider
+        return GECToRProvider
+    if name == "GECToRProviderConfig":
+        from .gector_config import GECToRProviderConfig
+        return GECToRProviderConfig
+    if name == "PythonProviderConfig":
+        from .python_config import PythonProviderConfig
+        return PythonProviderConfig
     if name in {"SmolLMProviderConfig", "GPUProof"}:
         from .config import GPUProof, SmolLMProviderConfig
         return {"SmolLMProviderConfig": SmolLMProviderConfig, "GPUProof": GPUProof}[name]

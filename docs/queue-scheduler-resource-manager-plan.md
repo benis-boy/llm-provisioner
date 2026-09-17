@@ -12,11 +12,14 @@ durable optional-function evaluation, an async QueueScheduler, a transport-neutr
 ResourceManager core, RM and scheduler HTTP/JSON/SSE bindings, artifact verification
 and experimental compatibility tools. A read-only selected-artifact verification
 HTTP endpoint and read-only exact measured-profile validation also exist. It does
-**not** yet contain capacity-measurement HTTP bindings, production health-state
-wiring, a production image,
-complete three-model production adapters, or measured provisioning runtime. The
-installable SmolLM adapter and Linux GPU-ownership proof now have local regression
-coverage, but no real-adapter GPU/deployment verification. Unchecked work remains target-state design. Historical
+**not** yet contain capacity-measurement HTTP bindings, a supervised production
+bootstrap/image, or measured provisioning runtime. All three installable adapters
+now have candidate offline GPU evidence, including ResourceManager-mediated
+switching; that is not production deployment or measured capacity proof.
+Authoritative lifecycle-health wiring and strict offline configuration/artifact/
+measured-profile binding preflight now have local regression evidence. They still
+require the production supervisor and actual external dependency proofs.
+Unchecked work remains target-state design. Historical
 capacity notes are not implementation evidence.
 
 ### Implementation progress (2026-09-17)
@@ -24,6 +27,15 @@ capacity notes are not implementation evidence.
 Work is tracked in logical slices, not whole-phase completion claims. See
 [implementation decisions](implementation-decisions.md) and
 [queue-core boundaries](queue-core.md).
+
+Latest bounded slices: [authoritative lifecycle health](resource-manager-health.md)
+and [offline binding preflight](offline-bootstrap.md). The latter verifies selected
+artifact/runtime/GPU identities against read-only measured profiles before making
+unloaded provider bindings; it does not start a production service. Full discovery
+passes **427 tests in 50.677s**, with compilation and whitespace checks passing.
+Synthetic profile fixtures and loopback/fake-provider tests remain unit evidence.
+Next integration boundary is the production-owned private Ollama supervisor,
+pre-child GPU capture, server lifecycle and live dependency proof collection.
 
 - [x] **Slice A — Contract foundation:** OpenAPI draft, typed request/attempt,
   function, provisioning-bucket and profile contracts; status adjacency table;
@@ -75,6 +87,13 @@ Work is tracked in logical slices, not whole-phase completion claims. See
   Scheduler-over-HTTP exact publication and all three model selector shapes
   pass with fake providers. See [HTTP boundary](resource-manager-http.md).
 - [ ] **Phase 4 — ResourceManager and real adapters.**
+- [x] **CoEdIT isolated-adapter slice:** child-only CUDA/Transformers loading,
+  exact selected artifacts, full instruction/text token checks, deterministic
+  native batch-one execution, strict bounded RPC and identity-fenced process
+  cleanup. The actual adapter passed offline small/near-bucket inference,
+  positive worker residency, stale-session rejection and injected process-loss
+  cleanup. Its p=1 profile is explicitly unmeasured; full switching and
+  production packaging remain open. See [CoEdIT GPU check](coedit-adapter-gpu-check.md).
 - [x] **SmolLM adapter slice:** existing supervisor-owned loopback Ollama client,
    selected manifest/GGUF identity, bounded local import and raw ASCII framing,
    configured parallelism, typed supervisor/runner readiness, and verified cleanup.
@@ -193,6 +212,46 @@ notification is not proof of GPU-kernel entry or interruptibility. This is not
 the full compatibility matrix or measured capacity acceptance.
 See the [proof inventory](../.opencode/skills/goal-oriented-design/references/e2e-proof.md).
 No leaf goal is `done`.
+
+Latest CoEdIT verification: **369 tests passed in 39.766 seconds** with warnings
+as errors; compilation passed. The **36-test** focused check passed in 2.791
+seconds. Offline image
+`sha256:e6187ee93a7c9c9a913f983813c6d172eb09ccd8c0d8729f1e146ffef9394582`
+passed actual normal and injected-process-loss scenarios on the selected GPU.
+One strict descendant worker was proved; both owned containers were removed.
+This is candidate adapter evidence for G4.1/G4.3, not measured G4.2 capacity or
+production deployment proof.
+
+The GECToR slice adds an installable, offline, worker-isolated adapter on
+the same fenced Python transport. It is deliberately limited to the exact
+float32, native-batch-one, one-iteration, 128-subword bucket and claims no
+measured capacity. The selected manifest, safetensors loading completeness,
+verb vocabulary, no-truncation preprocessing, output bound, and child GPU
+identity are checked independently. Actual offline GECToR 1.2.0 normal and
+injected-process-loss runs now pass through the installed adapter and RM.
+The normal run proves two aligned responses, overlong-input rejection without
+poisoning the worker, one owned GPU runner, stale-session rejection and cleanup.
+Both named containers were verified absent. Full discovery passed **391 tests
+in 40.037 seconds**, focused verification **53 in 2.808 seconds**, and compilation
+and whitespace checks passed. Candidate image:
+`sha256:fed8212118fb3f4309826479cd4fddeaa83701428d1a9f1198b4054e56537389`.
+See [GECToR candidate commands](gector-adapter-gpu-check.md). Actual combined
+installed-adapter switching subsequently passed as recorded below. Production
+packaging and measured profiles remain unfinished; these checks do not establish
+production deployment or measured capacity.
+
+The actual installed-adapter roundtrip now passes offline under one ResourceManager
+and one parent-rooted GPU proof: SmolLM → CoEdIT → GECToR → SmolLM, three
+cleanup-gated replacements, four successful responses, stale submit/cancel
+rejection and one CoEdIT execution-entry cancellation with no exposed result.
+Final provider/daemon/GPU cleanup passed and the owned container was verified
+absent. Candidate image:
+`sha256:6785609cd5c7bfa792f9f839d481b4b0899ce8cdc96cd01ff33d40e7a8829fe2`.
+Focused verification passed **91 tests**, full discovery **396**, compilation and
+whitespace checks passed. See [switching commands](three-model-adapter-gpu-check.md).
+This replaces the experimental-adapter switching gap with candidate installed
+boundary evidence, not measured capacity, kernel interruption, production health
+or scheduler-to-server GPU E2E.
 
 ## 2. Scope and fixed decisions
 

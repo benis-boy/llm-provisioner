@@ -124,3 +124,31 @@ bounded probes, safe diagnostics and fail-closed injected readiness snapshots;
 it does not establish production bootstrap or GPU readiness. Capacity-measurement
 HTTP bindings, complete production adapters/image, actual measured capacity profiles and
 qualifying production-boundary E2E remain absent. All leaves remain partial.
+
+The installable CoEdIT isolated adapter now also has candidate real-boundary
+evidence: offline small/near-bucket inference, exact worker residency, stale
+session rejection and injected process-loss cleanup passed through ResourceManager.
+Its strict batch-one p=1 profile is unmeasured. Full discovery passes 369 tests.
+GECToR's installable isolated adapter now also passes offline real-boundary
+normal and injected-process-loss candidate checks: exact package preprocessing,
+overlong rejection without poisoning the worker, aligned responses, positive
+residency, stale-token rejection and owned cleanup. Full discovery passes 391
+tests. Its fixed float32/128-subword/one-iteration batch-one profile is unmeasured.
+A single parent-rooted GPU proof and ResourceManager now also pass actual
+installed-adapter SmolLM → CoEdIT → GECToR → SmolLM replacement: three cleanup-gated
+switches, four successful responses, stale submit/cancel rejection, CoEdIT
+execution-entry cancellation result fencing and final provider/daemon/GPU cleanup.
+The offline candidate container was verified absent; full discovery passes 396
+tests. G4.1/G4.2/G4.3 remain partial: this does not prove active kernel interruption,
+measured capacity, production bootstrap/deployment or scheduler-to-GPU E2E.
+
+ResourceManager now exposes immutable lifecycle/revision observations used by
+health to fence loading, replacement, cleanup failure and late completion.
+Readiness rechecks external dependency proofs and lifecycle after asynchronous
+probes; probes cannot upgrade missing/false proofs or reuse a replaced session's
+evidence. Offline bootstrap preflight now validates bounded operator configuration,
+selected artifacts, metadata-only runtime identities and exact measured p=1/m=1
+profiles before constructing all three unloaded real providers. Later resolution
+cannot expand the supported selector or admission capacity. Full discovery passes
+427 tests. These are unit/local-loopback proofs, not a supervised production
+bootstrap, actual measured capacity or deployment readiness; G4 remains partial.
