@@ -6,7 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "llm-provider"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["aiohttp>=3.13,<4"]
+
+[project.optional-dependencies]
+test = ["openapi-spec-validator>=0.7,<0.8", "PyYAML>=6,<7"]
 
 [tool.setuptools.packages.find]
 include = ["services", "services.*"]

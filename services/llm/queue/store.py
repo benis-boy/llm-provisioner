@@ -49,12 +49,28 @@ class SessionError(QueueError):
     pass
 
 
+class OperationStale(QueueError):
+    """An operation key names a lifecycle from an older local generation."""
+    pass
+
+
 @dataclass(frozen=True)
 class Session:
     scheduler_id: str
     model_id: ModelId
     token: str
     generation: int
+
+
+@dataclass(frozen=True)
+class EvaluatedClaim:
+    request_id: str
+    version: int
+    session_token: str
+    generation: int
+    payload_reference: str
+    intent_fingerprint: str
+    nonce: str
 
 
 def _fingerprint(payload_reference: str, dependencies: tuple[str, ...],
@@ -105,7 +121,7 @@ class QueueStore:
                 running_at REAL, done_at REAL, next_attempt_at REAL,
                 retry_elapsed REAL NOT NULL DEFAULT 0,
                 first_retry_at REAL, retry_count INTEGER NOT NULL DEFAULT 0,
-                error_code TEXT
+                error_code TEXT, evaluated_payload_reference TEXT
             );
             CREATE UNIQUE INDEX IF NOT EXISTS request_idempotency
                 ON requests(scheduler_id, idempotency_key)
@@ -126,7 +142,7 @@ class QueueStore:
                 started REAL, finished REAL, lease_until REAL,
                 gpu_start REAL, gpu_end REAL, gpu_ms INTEGER,
                 gpu_complete INTEGER NOT NULL DEFAULT 0,
-                active INTEGER NOT NULL DEFAULT 1
+                active INTEGER NOT NULL DEFAULT 1, payload_reference TEXT
             );
             CREATE UNIQUE INDEX IF NOT EXISTS one_active_attempt
                 ON attempts(request_id) WHERE active=1;
@@ -146,6 +162,25 @@ class QueueStore:
                 cursor INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT,
                 kind TEXT NOT NULL, data TEXT NOT NULL, created REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS evaluated_capabilities (
+                nonce TEXT PRIMARY KEY, request_id TEXT NOT NULL, version INTEGER NOT NULL,
+                session_token TEXT NOT NULL, generation INTEGER NOT NULL,
+                payload_reference TEXT NOT NULL, intent_fingerprint TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS dispatch_metadata (
+                token TEXT PRIMARY KEY REFERENCES attempts(token) ON DELETE CASCADE,
+                payload_digest TEXT NOT NULL, context_size INTEGER,
+                bucket_identity TEXT, created REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS scheduler_operations (
+                scheduler_id TEXT NOT NULL, operation TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL, fingerprint TEXT NOT NULL,
+                target_generation INTEGER, outcome TEXT NOT NULL,
+                created REAL NOT NULL,
+                PRIMARY KEY(scheduler_id, operation, idempotency_key)
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS scheduler_operation_keys
+                ON scheduler_operations(scheduler_id, idempotency_key);
             """
         )
         # This is intentionally an additive, transactional upgrade rather than
@@ -156,6 +191,12 @@ class QueueStore:
             for name in ("ready", "template"):
                 if name not in columns:
                     self.db.execute(f"ALTER TABLE requests ADD COLUMN {name} TEXT")
+            columns = {row[1] for row in self.db.execute("PRAGMA table_info(requests)")}
+            if "evaluated_payload_reference" not in columns:
+                self.db.execute("ALTER TABLE requests ADD COLUMN evaluated_payload_reference TEXT")
+            attempt_columns = {row[1] for row in self.db.execute("PRAGMA table_info(attempts)")}
+            if "payload_reference" not in attempt_columns:
+                self.db.execute("ALTER TABLE attempts ADD COLUMN payload_reference TEXT")
             self.db.execute("COMMIT")
         except Exception:
             self.db.execute("ROLLBACK")
@@ -166,6 +207,22 @@ class QueueStore:
                 "INSERT INTO meta(key,value) VALUES('model_id',?)",
                 (self.model_id.value,),
             )
+        self.db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('eligibility_version','0')")
+
+    def _version(self) -> int:
+        row = self.db.execute("SELECT value FROM meta WHERE key='eligibility_version'").fetchone()
+        return int(row[0]) if row else 0
+
+    def _bump_version(self) -> int:
+        value = self._version() + 1
+        self.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('eligibility_version',?)", (str(value),))
+        # Snapshot capabilities cannot survive a durable queue mutation.
+        self.db.execute("DELETE FROM evaluated_capabilities")
+        return value
+
+    def eligibility_version(self) -> int:
+        self._owner()
+        return self._version()
 
     def close(self) -> None:
         self.db.close()
@@ -196,16 +253,40 @@ class QueueStore:
                 or int(generation[0]) != self.session.generation):
             raise SessionError("store session is no longer the owner")
 
-    def start_session(self) -> Session:
+    def start_session(self, idempotency_key: str | None = None) -> Session:
         """Atomically acquire ownership, superseding any prior scheduler."""
+        if idempotency_key is not None and (not isinstance(idempotency_key, str) or not idempotency_key):
+            raise ValueError("idempotency_key must be non-empty text")
         if self.session is not None:
             try:
                 self._owner()
-                return self.session
+                if idempotency_key is None:
+                    return self.session
             except SessionError:
                 self.session = None
         self._begin()
         try:
+            if idempotency_key is not None:
+                conflict = self.db.execute("SELECT operation FROM scheduler_operations WHERE scheduler_id=? AND idempotency_key=?",
+                                           (self.scheduler_id, idempotency_key)).fetchone()
+                if conflict and conflict[0] != "start":
+                    raise IdempotencyConflict(idempotency_key)
+                old = self.db.execute(
+                    "SELECT * FROM scheduler_operations WHERE scheduler_id=? AND operation='start' AND idempotency_key=?",
+                    (self.scheduler_id, idempotency_key)).fetchone()
+                fingerprint = self.model_id.value
+                if old:
+                    if old["fingerprint"] != fingerprint:
+                        raise IdempotencyConflict(idempotency_key)
+                    accepting = self.db.execute("SELECT value FROM meta WHERE key='accepting'").fetchone()
+                    if (self.session is None or (old["target_generation"] is not None and old["target_generation"] != self.session.generation)
+                            or not accepting or accepting[0] != "1"):
+                        raise OperationStale(idempotency_key)
+                    self.db.execute("COMMIT")
+                    return self.session
+                self.db.execute(
+                    "INSERT INTO scheduler_operations VALUES(?,?,?,?,?,?,?)",
+                    (self.scheduler_id, "start", idempotency_key, fingerprint, None, "pending", time.time()))
             owner = self.db.execute(
                 "SELECT value FROM meta WHERE key='scheduler_id'"
             ).fetchone()
@@ -244,12 +325,46 @@ class QueueStore:
                 (str(generation),),
             )
             self.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('accepting','1')")
+            # A generation/token replacement invalidates evaluations held by
+            # other store handles even when recovery had no active attempts.
+            self._bump_version()
+            if idempotency_key is not None:
+                self.db.execute(
+                    "UPDATE scheduler_operations SET target_generation=?,outcome=? WHERE scheduler_id=? AND operation='start' AND idempotency_key=?",
+                    (generation, json.dumps({"generation": generation, "token": token}), self.scheduler_id, idempotency_key))
             self.db.execute("COMMIT")
         except Exception:
             self.db.execute("ROLLBACK")
             raise
         self.session = Session(self.scheduler_id, self.model_id, token, generation)
         return self.session
+
+    def complete_start(self, idempotency_key: str, session: Session) -> None:
+        """Commit the RM acknowledgement for a keyed local start."""
+        self._begin()
+        try:
+            self._owner()
+            row = self.db.execute(
+                "SELECT * FROM scheduler_operations WHERE scheduler_id=? AND operation='start' AND idempotency_key=?",
+                (self.scheduler_id, idempotency_key)).fetchone()
+            accepting = self.db.execute("SELECT value FROM meta WHERE key='accepting'").fetchone()
+            current = self.db.execute("SELECT value FROM meta WHERE key='session_token'").fetchone()
+            generation = self.db.execute("SELECT value FROM meta WHERE key='generation'").fetchone()
+            owner = self.db.execute("SELECT value FROM meta WHERE key='scheduler_id'").fetchone()
+            model = self.db.execute("SELECT value FROM meta WHERE key='model_id'").fetchone()
+            if (not row or row["target_generation"] != session.generation
+                    or session.scheduler_id != self.scheduler_id or session.model_id != self.model_id
+                    or not accepting or accepting[0] != "1" or not current or current[0] != session.token
+                    or not generation or int(generation[0]) != session.generation
+                    or not owner or owner[0] != session.scheduler_id
+                    or not model or model[0] != session.model_id.value):
+                raise OperationStale(idempotency_key)
+            self.db.execute("UPDATE scheduler_operations SET outcome=? WHERE scheduler_id=? AND operation='start' AND idempotency_key=?",
+                             (json.dumps({"generation": session.generation, "token": session.token}), self.scheduler_id, idempotency_key))
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
 
     def recover_session(self) -> Session:
         """Acquire a new fenced session for the same durable scheduler."""
@@ -258,21 +373,116 @@ class QueueStore:
         ).fetchone()
         if owner and owner[0] != self.scheduler_id:
             return self.start_session()
+        # Recovery deliberately differs from idempotent start_session(): it
+        # must replace even this handle's currently valid local fence.
+        self.session = None
         return self.start_session()
 
     def _event(self, request_id: str | None, kind: str, data: dict) -> None:
+        self._bump_version()
+        # Events are the durable history, not a notification hint.  Insert first
+        # to obtain the real global cursor, then attach the projection in the
+        # same transaction so replay cannot stamp an old event with a newer row.
         self.db.execute(
             "INSERT INTO events(request_id,kind,data,created) VALUES(?,?,?,?)",
             (request_id, kind, json.dumps(data, sort_keys=True), time.time()),
         )
+        if request_id is not None:
+            cursor = self.db.execute("SELECT last_insert_rowid()").fetchone()[0]
+            data = dict(data)
+            data["snapshot"] = self._projection(request_id, sequence=cursor)
+            self.db.execute("UPDATE events SET data=? WHERE cursor=?",
+                            (json.dumps(data, sort_keys=True), cursor))
+
+    def _projection(self, request_id: str, sequence: int | None = None) -> dict:
+        # request_id is globally unique in this database.  Do not qualify this
+        # historical lookup with the *current* store owner: a different-model
+        # supersession must still be able to finish the old owner's event with
+        # the old owner's immutable identity.
+        row = self.db.execute(
+            "SELECT * FROM requests WHERE request_id=?", (request_id,),
+        ).fetchone()
+        if not row:
+            raise QueueError("unknown request")
+        attempt = self.db.execute(
+            "SELECT started,finished,gpu_ms,gpu_complete FROM attempts "
+            "WHERE request_id=? ORDER BY COALESCE(finished,started) DESC LIMIT 1",
+            (request_id,),
+        ).fetchone()
+        handoff = self.db.execute(
+            "SELECT result_reference FROM handoffs WHERE request_id=? AND acknowledged=1",
+            (request_id,),
+        ).fetchone()
+        seq = sequence if sequence is not None else self.db.execute(
+            "SELECT COALESCE(MAX(cursor),0) FROM events WHERE request_id=?", (request_id,)
+        ).fetchone()[0]
+        running_done = None
+        if row["running_at"] is not None and row["done_at"] is not None:
+            running_done = max(0, round((row["done_at"] - row["running_at"]) * 1000))
+        return {
+            "requestId": row["request_id"], "schedulerId": row["scheduler_id"],
+            "modelId": row["model_id"], "status": row["status"], "sequence": int(seq),
+            "runningAt": row["running_at"], "doneAt": row["done_at"],
+            "runningToDoneMs": running_done,
+            "timeOnGpuMs": None if not attempt else attempt["gpu_ms"],
+            "gpuTimingComplete": bool(attempt and attempt["gpu_complete"]),
+            "errorCode": row["error_code"],
+            "resultReference": None if not handoff else handoff["result_reference"],
+            "cancellation": bool(row["cancellation"]),
+        }
+
+    def projection(self, request_id: str) -> dict:
+        """Return the bounded public request projection."""
+        self._owner()
+        return self._projection(request_id)
+
+    def event_highwater(self) -> int:
+        self._owner()
+        return int(self.db.execute("SELECT COALESCE(MAX(cursor),0) FROM events").fetchone()[0])
 
     def events(self, after: int = 0, limit: int | None = None):
+        if isinstance(after, bool) or not isinstance(after, int) or after < 0:
+            raise ValueError("cursor must be a non-negative integer")
+        if after > self.event_highwater():
+            raise ValueError("cursor is ahead of durable history")
         sql = "SELECT * FROM events WHERE cursor>? ORDER BY cursor"
         args: list[object] = [after]
         if limit is not None:
             sql += " LIMIT ?"
             args.append(limit)
         return self.db.execute(sql, args).fetchall()
+
+    def request_events(self, request_id: str, after: int = 0, limit: int = 64):
+        """Return one bounded request-specific cursor slice.
+
+        Filtering in SQLite is essential: a global cursor slice can otherwise
+        repeatedly contain unrelated events and permanently starve this request.
+        """
+        if (not isinstance(request_id, str) or not request_id or isinstance(after, bool)
+                or not isinstance(after, int) or after < 0
+                or isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0):
+            raise ValueError("invalid request event cursor or limit")
+        self._owner()
+        return self.db.execute(
+            "SELECT * FROM events WHERE request_id=? AND cursor>? ORDER BY cursor LIMIT ?",
+            (request_id, after, limit),
+        ).fetchall()
+
+    def request_history_has_legacy_event(self, request_id: str, after: int = 0) -> bool:
+        """Boundedly test all replay rows for a usable immutable snapshot."""
+        if (not isinstance(request_id, str) or not request_id or isinstance(after, bool)
+                or not isinstance(after, int) or after < 0):
+            raise ValueError("invalid request event cursor")
+        self._owner()
+        # CASE prevents json_type from being evaluated against malformed legacy
+        # data. EXISTS returns one scalar rather than materializing history.
+        row = self.db.execute(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE request_id=? AND cursor>? "
+            "AND CASE WHEN json_valid(data) THEN json_type(data,'$.snapshot') "
+            "ELSE NULL END IS NULL)",
+            (request_id, after),
+        ).fetchone()
+        return bool(row[0])
 
     def _terminalize_all(self, reason: str) -> None:
         rows = self.db.execute(
@@ -428,6 +638,7 @@ class QueueStore:
             if anchor:
                 self.db.execute("UPDATE skip_groups SET tail=? WHERE anchor=?", (request_id, anchor))
             self._event(request_id, "enqueue", {"idempotency_key": idempotency_key})
+            self._bump_version()
             self.db.execute("COMMIT")
             return self.get(request_id)
         except Exception:
@@ -506,6 +717,128 @@ class QueueStore:
             "WHERE r.scheduler_id=? ORDER BY p.rank", (self.scheduler_id,)
         ).fetchall()
 
+    def eligible_candidates(self, limit: int = 32, after_rank: int | None = None):
+        """Return one bounded FIFO slice; the evaluator applies readiness gates."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+            raise ValueError("limit must be positive")
+        self._owner()
+        sql = ("SELECT r.*,p.rank FROM requests r JOIN positions p USING(request_id) "
+               "WHERE r.scheduler_id=? AND r.status='scheduled' ")
+        args: list[object] = [self.scheduler_id]
+        if after_rank is not None:
+            sql += "AND p.rank>? "
+            args.append(after_rank)
+        sql += "ORDER BY p.rank LIMIT ?"
+        args.append(limit)
+        return self.db.execute(sql, args).fetchall()
+
+    def acknowledged_dependency_results(self, request_id: str) -> dict[str, str] | None:
+        self._owner()
+        row = self.db.execute("SELECT dependencies FROM requests WHERE request_id=? AND scheduler_id=?", (request_id, self.scheduler_id)).fetchone()
+        if not row:
+            return None
+        result = {}
+        for dependency in json.loads(row[0]):
+            handoff = self.db.execute("SELECT result_reference FROM handoffs WHERE request_id=? AND acknowledged=1", (dependency,)).fetchone()
+            if not handoff:
+                return None
+            result[dependency] = handoff[0]
+        return result
+
+    def dependency_failed(self, request_id: str) -> bool:
+        self._owner()
+        row = self.db.execute("SELECT dependencies FROM requests WHERE request_id=? AND scheduler_id=?", (request_id, self.scheduler_id)).fetchone()
+        if not row:
+            return False
+        return any(self.db.execute("SELECT status FROM requests WHERE request_id=?", (item,)).fetchone()[0] in ("error", "cancelled") for item in json.loads(row[0]))
+
+    def claim_evaluated(self, capability: EvaluatedClaim, now: float | None = None,
+                        lease_seconds: float = 30) -> str | None:
+        """Atomically consume an evaluator capability and create submit intent."""
+        now = time.time() if now is None else now
+        if not isinstance(capability, EvaluatedClaim):
+            raise ValueError("evaluated capability required")
+        self._begin()
+        try:
+            self._require_accepting()
+            if (self.session is None or capability.session_token != self.session.token or
+                    capability.generation != self.session.generation or capability.version != self._version()):
+                raise StaleCallback("evaluation is stale")
+            row = self.db.execute("SELECT * FROM requests WHERE scheduler_id=? AND request_id=?", (self.scheduler_id, capability.request_id)).fetchone()
+            proof = self.db.execute("SELECT * FROM evaluated_capabilities WHERE nonce=?", (capability.nonce,)).fetchone()
+            if (not proof or proof["request_id"] != capability.request_id or proof["version"] != capability.version or
+                    proof["session_token"] != capability.session_token or proof["generation"] != capability.generation or
+                    proof["payload_reference"] != capability.payload_reference or proof["intent_fingerprint"] != capability.intent_fingerprint or
+                    not row or row["status"] != "scheduled" or row["fingerprint"] != capability.intent_fingerprint or
+                    row["evaluated_payload_reference"] != capability.payload_reference):
+                self.db.execute("ROLLBACK")
+                return None
+            if row["next_attempt_at"] and row["next_attempt_at"] > now:
+                self.db.execute("ROLLBACK"); return None
+            if row["first_retry_at"] is not None and now - row["first_retry_at"] >= 300:
+                self._cancel_request_rows(capability.request_id, "error", "retry_exhausted")
+                self.db.execute("COMMIT"); return None
+            dependencies = json.loads(row["dependencies"])
+            statuses = [self.db.execute("SELECT status FROM requests WHERE request_id=?", (d,)).fetchone()[0] for d in dependencies]
+            if any(s in ("error", "cancelled") for s in statuses):
+                self._cancel_request_rows(capability.request_id, "error", "dependency_failed")
+                self.db.execute("COMMIT"); return None
+            if any(s != "done" for s in statuses):
+                self.db.execute("ROLLBACK"); return None
+            used = self.db.execute("DELETE FROM evaluated_capabilities WHERE nonce=?", (capability.nonce,)).rowcount
+            if used != 1:
+                self.db.execute("ROLLBACK"); return None
+            token = secrets.token_urlsafe(24)
+            self.db.execute("UPDATE requests SET status='running',running_at=COALESCE(running_at,?) WHERE request_id=?", (now, capability.request_id))
+            self._close_skip_groups(capability.request_id)
+            self.db.execute("INSERT INTO attempts(request_id,token,session,generation,started,lease_until,payload_reference) VALUES(?,?,?,?,?,?,?)", (capability.request_id, token, capability.session_token, capability.generation, now, now + lease_seconds, capability.payload_reference))
+            self.db.execute("INSERT INTO outbox(operation_id,kind,idempotency_key,request_id,token,payload_reference,created) VALUES(?,?,?,?,?,?,?)", (secrets.token_urlsafe(16), "submit", token, capability.request_id, token, capability.payload_reference, now))
+            self._event(capability.request_id, "claim", {"token": token, "evaluated": True})
+            self._bump_version()
+            self.db.execute("COMMIT")
+            return token
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
+
+    def record_evaluation(self, request_id: str, version: int, payload_reference: str) -> EvaluatedClaim:
+        """Persist evaluated input only if the queue has not changed."""
+        self._begin()
+        try:
+            self._owner()
+            if version != self._version():
+                raise StaleCallback("evaluation version changed")
+            if not isinstance(payload_reference, str) or not payload_reference:
+                raise ValueError("payload reference must be non-empty text")
+            row = self.db.execute("SELECT * FROM requests WHERE request_id=? AND scheduler_id=? AND status='scheduled'", (request_id, self.scheduler_id)).fetchone()
+            if not row:
+                raise StaleCallback("request is no longer scheduled")
+            self.db.execute("UPDATE requests SET evaluated_payload_reference=? WHERE request_id=?", (payload_reference, request_id))
+            nonce = secrets.token_urlsafe(32)
+            self.db.execute("INSERT INTO evaluated_capabilities VALUES(?,?,?,?,?,?,?)", (nonce, request_id, version, self.session.token, self.session.generation, payload_reference, row["fingerprint"]))
+            capability = EvaluatedClaim(request_id, version, self.session.token, self.session.generation, payload_reference, row["fingerprint"], nonce)
+            self.db.execute("COMMIT")
+            return capability
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
+
+    def fail_scheduled(self, request_id: str, error_code: str, expected_version: int,
+                       expected_session: str, expected_generation: int) -> bool:
+        self._begin()
+        try:
+            self._owner()
+            if (self._version() != expected_version or self.session is None or
+                    self.session.token != expected_session or self.session.generation != expected_generation):
+                self.db.execute("ROLLBACK"); return False
+            row = self.db.execute("SELECT status FROM requests WHERE request_id=? AND scheduler_id=?", (request_id, self.scheduler_id)).fetchone()
+            if not row or row[0] != "scheduled":
+                self.db.execute("ROLLBACK"); return False
+            self._cancel_request_rows(request_id, "error", error_code)
+            self.db.execute("COMMIT"); return True
+        except Exception:
+            self.db.execute("ROLLBACK"); raise
+
     def claim(self, request_id: str, session_token: str | None = None,
               generation: int | None = None, now: float | None = None,
               lease_seconds: float = 30) -> str | None:
@@ -555,15 +888,16 @@ class QueueStore:
             )
             self._close_skip_groups(request_id)
             self.db.execute(
-                "INSERT INTO attempts(request_id,token,session,generation,started,lease_until) "
-                "VALUES(?,?,?,?,?,?)",
-                (request_id, token, session_token, generation, now, now + lease_seconds),
+                "INSERT INTO attempts(request_id,token,session,generation,started,lease_until,payload_reference) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (request_id, token, session_token, generation, now, now + lease_seconds,
+                 row["payload_reference"]),
             )
             self.db.execute(
                 "INSERT INTO outbox(operation_id,kind,idempotency_key,request_id,token,"
                 "payload_reference,created) VALUES(?,?,?,?,?,?,?)",
                 (secrets.token_urlsafe(16), "submit", token, request_id, token,
-                 request_id, now),
+                 row["payload_reference"], now),
             )
             self._event(request_id, "claim", {"token": token})
             self.db.execute("COMMIT")
@@ -622,6 +956,8 @@ class QueueStore:
                     (row["token"],),
                 )
                 self._event(row["request_id"], "lease_expired", {})
+            if rows:
+                self._bump_version()
             self.db.execute("COMMIT")
             return len(rows)
         except Exception:
@@ -755,6 +1091,7 @@ class QueueStore:
                 (secrets.token_urlsafe(16), "handoff", idempotency_key, request_id,
                  token, result_reference, time.time()),
             )
+            self._bump_version()
             self.db.execute("COMMIT")
             return self.db.execute("SELECT * FROM handoffs WHERE request_id=?", (request_id,)).fetchone()
         except Exception:
@@ -796,6 +1133,7 @@ class QueueStore:
                 if row["status"] != RequestStatus.DONE.value:
                     self.db.execute("UPDATE requests SET status='done',done_at=? WHERE request_id=?", (time.time(), request_id))
                     self._event(request_id, "status", {"new": "done"})
+                self._bump_version()
             self.db.execute("COMMIT")
             return self.get(request_id)
         except Exception:
@@ -821,6 +1159,7 @@ class QueueStore:
                     "UPDATE outbox SET acknowledged=1 WHERE idempotency_key=?",
                     (idempotency_key,),
                 )
+                self._bump_version()
             self.db.execute("COMMIT")
             return bool(row["acknowledged"])
         except Exception:
@@ -859,15 +1198,26 @@ class QueueStore:
                     key = f"cancel:{request_id}:{token}"
                     self.db.execute("INSERT OR IGNORE INTO outbox(operation_id,kind,idempotency_key,request_id,token,payload_reference,created) VALUES(?,?,?,?,?,?,?)", (secrets.token_urlsafe(16), "cancel", key, request_id, token, request_id, now))
             self._event(request_id, "retry", {"retryable": retryable})
+            self._bump_version()
             self.db.execute("COMMIT")
             return self.get(request_id)
         except Exception:
             self.db.execute("ROLLBACK")
             raise
 
-    def cancel(self, request_id: str):
+    def cancel(self, request_id: str, idempotency_key: str | None = None):
         self._begin()
         try:
+            if idempotency_key is not None:
+                prior = self.db.execute("SELECT fingerprint FROM scheduler_operations WHERE scheduler_id=? AND operation='cancel' AND idempotency_key=?",
+                                        (self.scheduler_id, idempotency_key)).fetchone()
+                if prior:
+                    if prior[0] != request_id:
+                        raise IdempotencyConflict(idempotency_key)
+                    current = self.db.execute("SELECT * FROM requests WHERE scheduler_id=? AND request_id=?",
+                                              (self.scheduler_id, request_id)).fetchone()
+                    self.db.execute("COMMIT")
+                    return current
             self._owner()
             row = self.db.execute(
                 "SELECT status FROM requests WHERE scheduler_id=? AND request_id=?",
@@ -875,19 +1225,77 @@ class QueueStore:
             ).fetchone()
             if not row:
                 raise QueueError("unknown request")
+            generation = self.session.generation
+            fingerprint = request_id
+            if idempotency_key is not None:
+                if not isinstance(idempotency_key, str) or not idempotency_key:
+                    raise ValueError("idempotency_key must be non-empty text")
+                conflict = self.db.execute("SELECT operation FROM scheduler_operations WHERE scheduler_id=? AND idempotency_key=?",
+                                           (self.scheduler_id, idempotency_key)).fetchone()
+                if conflict and conflict[0] != "cancel":
+                    raise IdempotencyConflict(idempotency_key)
+                old = self.db.execute(
+                    "SELECT * FROM scheduler_operations WHERE scheduler_id=? AND operation='cancel' AND idempotency_key=?",
+                    (self.scheduler_id, idempotency_key)).fetchone()
+                if old:
+                    if old["fingerprint"] != fingerprint:
+                        raise IdempotencyConflict(idempotency_key)
+                    result = json.loads(old["outcome"])
+                    if old["target_generation"] == generation:
+                        current = self.db.execute("SELECT * FROM requests WHERE scheduler_id=? AND request_id=?", (self.scheduler_id, request_id)).fetchone()
+                        self.db.execute("COMMIT")
+                        return current
+                    self.db.execute("COMMIT")
+                    return self.db.execute("SELECT * FROM requests WHERE scheduler_id=? AND request_id=?", (self.scheduler_id, request_id)).fetchone()
+                self.db.execute("INSERT INTO scheduler_operations VALUES(?,?,?,?,?,?,?)",
+                                 (self.scheduler_id, "cancel", idempotency_key, fingerprint, generation, "pending", time.time()))
             if row[0] not in {x.value for x in TERMINAL}:
                 self._cancel_request_rows(request_id, "cancelled", "client_cancelled")
+                self._bump_version()
+            if idempotency_key is not None:
+                self.db.execute("UPDATE scheduler_operations SET outcome=? WHERE scheduler_id=? AND operation='cancel' AND idempotency_key=?",
+                                 (json.dumps({"status": "cancelled" if row[0] not in {x.value for x in TERMINAL} else row[0]}), self.scheduler_id, idempotency_key))
             self.db.execute("COMMIT")
             return self.get(request_id)
         except Exception:
             self.db.execute("ROLLBACK")
             raise
 
-    def stop(self, reason: str = "stopped", cancelled: bool = False) -> int:
+    def stop(self, reason: str = "stopped", cancelled: bool = False,
+             idempotency_key: str | None = None) -> int:
         self._begin()
         try:
+            if idempotency_key is not None:
+                fingerprint = json.dumps([reason, cancelled], separators=(",", ":"))
+                prior = self.db.execute("SELECT fingerprint,outcome FROM scheduler_operations WHERE scheduler_id=? AND operation='stop' AND idempotency_key=?",
+                                        (self.scheduler_id, idempotency_key)).fetchone()
+                if prior:
+                    if prior[0] != fingerprint:
+                        raise IdempotencyConflict(idempotency_key)
+                    result = int(json.loads(prior[1])["count"])
+                    self.db.execute("COMMIT")
+                    return result
             self._owner()
             status = "cancelled" if cancelled else "error"
+            generation = self.session.generation
+            if idempotency_key is not None:
+                if not isinstance(idempotency_key, str) or not idempotency_key:
+                    raise ValueError("idempotency_key must be non-empty text")
+                fingerprint = json.dumps([reason, cancelled], separators=(",", ":"))
+                conflict = self.db.execute("SELECT operation FROM scheduler_operations WHERE scheduler_id=? AND idempotency_key=?",
+                                           (self.scheduler_id, idempotency_key)).fetchone()
+                if conflict and conflict[0] != "stop":
+                    raise IdempotencyConflict(idempotency_key)
+                old = self.db.execute("SELECT * FROM scheduler_operations WHERE scheduler_id=? AND operation='stop' AND idempotency_key=?",
+                                      (self.scheduler_id, idempotency_key)).fetchone()
+                if old:
+                    if old["fingerprint"] != fingerprint:
+                        raise IdempotencyConflict(idempotency_key)
+                    result = int(json.loads(old["outcome"])["count"])
+                    self.db.execute("COMMIT")
+                    return result
+                self.db.execute("INSERT INTO scheduler_operations VALUES(?,?,?,?,?,?,?)",
+                                 (self.scheduler_id, "stop", idempotency_key, fingerprint, generation, "pending", time.time()))
             rows = self.db.execute(
                 "SELECT request_id FROM requests WHERE scheduler_id=? AND status NOT IN ('done','error','cancelled')",
                 (self.scheduler_id,),
@@ -895,6 +1303,9 @@ class QueueStore:
             for row in rows:
                 self._cancel_request_rows(row[0], status, reason)
             self.db.execute("UPDATE meta SET value='0' WHERE key='accepting'")
+            if idempotency_key is not None:
+                self.db.execute("UPDATE scheduler_operations SET outcome=? WHERE scheduler_id=? AND operation='stop' AND idempotency_key=?",
+                                 (json.dumps({"count": len(rows), "status": status}), self.scheduler_id, idempotency_key))
             self.db.execute("COMMIT")
             return len(rows)
         except Exception:
@@ -907,3 +1318,108 @@ class QueueStore:
         return self.db.execute(
             f"SELECT * FROM outbox {condition} ORDER BY created,operation_id"
         ).fetchall()
+
+    def pending_outbox(self, kind: str | None = None, limit: int = 64):
+        """Return a bounded immutable view of undelivered durable work."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+            raise ValueError("limit must be positive")
+        self._owner()
+        if kind is None:
+            return self.db.execute(
+                "SELECT * FROM outbox WHERE acknowledged=0 AND cancelled=0 "
+                "ORDER BY created,operation_id LIMIT ?", (limit,)).fetchall()
+        return self.db.execute(
+            "SELECT * FROM outbox WHERE acknowledged=0 AND cancelled=0 AND kind=? "
+            "ORDER BY created,operation_id LIMIT ?", (kind, limit)).fetchall()
+
+    def attempt(self, request_id: str, token: str):
+        self._owner()
+        return self.db.execute(
+            "SELECT a.*,d.payload_digest,d.context_size,d.bucket_identity "
+            "FROM attempts a LEFT JOIN dispatch_metadata d ON d.token=a.token "
+            "WHERE a.request_id=? AND a.token=?", (request_id, token)).fetchone()
+
+    def pending_submissions(self, limit: int = 16):
+        """Return replayable submit intents with their persisted decoded input."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+            raise ValueError("limit must be positive")
+        self._owner()
+        return self.db.execute(
+            "SELECT o.*,d.payload_digest,d.context_size,d.bucket_identity FROM outbox o "
+            "JOIN dispatch_metadata d ON d.token=o.token JOIN requests r ON r.request_id=o.request_id "
+            "WHERE o.kind='submit' AND o.acknowledged=0 AND o.cancelled=0 "
+            "AND r.status IN ('running','on_gpu') ORDER BY o.created,o.operation_id LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+    def active_attempts(self, limit: int = 64, after_token: str | None = None):
+        """Bounded view of every live attempt used only for lease renewal."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+            raise ValueError("limit must be positive")
+        self._owner()
+        return self.db.execute(
+            "SELECT a.request_id,a.token FROM attempts a WHERE a.active=1 "
+            "AND a.token>? ORDER BY a.token LIMIT ?", (after_token or "", limit)
+        ).fetchall()
+
+    def persist_dispatch_metadata(self, token: str, payload_digest: str,
+                                  context_size: int | None = None,
+                                  bucket_identity: str | None = None) -> None:
+        """Persist the exact decoded dispatch identity before network submit."""
+        if len(payload_digest) != 64 or any(c not in "0123456789abcdef" for c in payload_digest):
+            raise ValueError("payload_digest must be a SHA-256 digest")
+        self._begin()
+        try:
+            self._owner()
+            attempt = self.db.execute(
+                "SELECT a.request_id,a.session,a.generation,a.active,r.status FROM attempts a "
+                "JOIN requests r USING(request_id) WHERE a.token=?", (token,)
+            ).fetchone()
+            if (not attempt or not attempt["active"] or attempt["session"] != self.session.token
+                    or attempt["generation"] != self.session.generation
+                    or attempt["status"] not in ("running", "on_gpu")):
+                raise StaleCallback("dispatch metadata attempt is stale")
+            old = self.db.execute("SELECT * FROM dispatch_metadata WHERE token=?", (token,)).fetchone()
+            values = (payload_digest, context_size, bucket_identity)
+            if old:
+                if (old["payload_digest"], old["context_size"], old["bucket_identity"]) != values:
+                    raise IdempotencyConflict("dispatch metadata is immutable")
+            else:
+                self.db.execute(
+                    "INSERT INTO dispatch_metadata(token,payload_digest,context_size,bucket_identity,created) VALUES(?,?,?,?,?)",
+                    (token, *values, time.time()),
+                )
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
+
+    def fail_attempt(self, request_id: str, token: str, session: str, generation: int,
+                     error_code: str) -> None:
+        """Terminalize one fenced attempt without aborting unrelated queue work."""
+        self._begin()
+        try:
+            self._guard(request_id, token, session, generation)
+            self._cancel_request_rows(request_id, "error", error_code)
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
+
+    def acknowledge_submit(self, idempotency_key: str) -> bool:
+        """Record RM acceptance; replay remains safe because the key is stable."""
+        self._begin()
+        try:
+            self._owner()
+            row = self.db.execute(
+                "SELECT acknowledged,cancelled,kind FROM outbox WHERE idempotency_key=?",
+                (idempotency_key,)).fetchone()
+            if not row or row["kind"] != "submit":
+                raise QueueError("unknown submit outbox operation")
+            if not row["cancelled"] and not row["acknowledged"]:
+                self.db.execute("UPDATE outbox SET acknowledged=1 WHERE idempotency_key=?", (idempotency_key,))
+            self.db.execute("COMMIT")
+            return bool(row["acknowledged"])
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise

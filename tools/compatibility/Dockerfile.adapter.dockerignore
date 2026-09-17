@@ -1,0 +1,13 @@
+**
+!services/
+!services/**
+!tools/
+!tools/compatibility/
+!tools/compatibility/adapter_check.py
+!.compatibility/
+!.compatibility/adapter-deps/
+!.compatibility/adapter-deps/wheelhouse/
+!.compatibility/adapter-deps/wheelhouse/*.whl
+!.compatibility/adapter-deps/requirements.lock
+**/__pycache__/
+**/*.pyc

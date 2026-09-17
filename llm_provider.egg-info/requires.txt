@@ -1,0 +1,5 @@
+aiohttp<4,>=3.13
+
+[test]
+openapi-spec-validator<0.8,>=0.7
+PyYAML<7,>=6

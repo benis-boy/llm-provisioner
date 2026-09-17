@@ -1,0 +1,108 @@
+{
+  "manifest_sha256": "1d5846f5146de3712d3073af687ef306d44cd40b058dceb4ed580b67c0fcc43e",
+  "models": {
+    "CoEdIT": {
+      "files": [
+        {
+          "path": "model.safetensors",
+          "sha256": "c692f68bca5c6899801bc9fad626fefd3359ccd95e26dccae4dd72186fd98852",
+          "size": 3132439432
+        },
+        {
+          "path": "config.json",
+          "sha256": "bca25a47a9ceab6fa63555b0eaab289e89735bcf1de6cc1dcb6bc57e88881c0d",
+          "size": 787
+        },
+        {
+          "path": "tokenizer.json",
+          "sha256": "92c25d2e604250ffdcf35d7aec47931868ca92b35d6afe84dc039a47a3a87226",
+          "size": 2422262
+        },
+        {
+          "path": "tokenizer_config.json",
+          "sha256": "16dcefb67ade62dc4f5fb2b1be434e10116f8da40c964c2b43fcf7294944f397",
+          "size": 2497
+        },
+        {
+          "path": "special_tokens_map.json",
+          "sha256": "5c87151ef0f72a99d1f766a4c418bd2a1f90aaa30a8e22fe5eca9641daebb64f",
+          "size": 2201
+        },
+        {
+          "path": "spiece.model",
+          "sha256": "d60acb128cf7b7f2536e8f38a5b18a05535c9e14c7a355904270e15b0945ea86",
+          "size": 791656
+        },
+        {
+          "path": "generation_config.json",
+          "sha256": "eed058a57a4e9aa945c08aab951ae8455298d8912a5fe2d301caf0141595fd77",
+          "size": 142
+        }
+      ],
+      "missing": [],
+      "model_id": "CoEdIT",
+      "present_count": 7,
+      "required_count": 7,
+      "root": "/opt/llm/models/CoEdIT"
+    },
+    "GECToR": {
+      "files": [
+        {
+          "path": "model.safetensors",
+          "sha256": "f399c999ba19811601d685016fad4589fd397859b4ac1eca0c42fd8aeb0c9fe4",
+          "size": 1641219900
+        },
+        {
+          "path": "config.json",
+          "sha256": "ad451a7184e2dfbf358c2a139ec4a4b1f0ff4e92638966ddff89d8ef00787b79",
+          "size": 299344
+        },
+        {
+          "path": "tokenizer.json",
+          "sha256": "2dae6d27ab6c71e94e0fc900ab3e145b1f93c3b3fd59d3a0115848fc12c05a8c",
+          "size": 2110055
+        },
+        {
+          "path": "tokenizer_config.json",
+          "sha256": "461be44aecf07edfecfa24dc8782a79d3fce6b132db5276712ff156d6b374d54",
+          "size": 1453
+        },
+        {
+          "path": "special_tokens_map.json",
+          "sha256": "91da83d1dbe6bc07edf077bf28476c98cd8a7283cf5ed688a327b6dd6ecf761a",
+          "size": 1014
+        },
+        {
+          "path": "verb-form-vocab.txt",
+          "sha256": "5906804ec8a1acd8cbfc2918522bf429ce5edded8bbc46ffc2be861d280d3abf",
+          "size": 4390076
+        }
+      ],
+      "missing": [],
+      "model_id": "GECToR",
+      "present_count": 6,
+      "required_count": 6,
+      "root": "/opt/llm/models/GECToR"
+    },
+    "SmolLM": {
+      "files": [
+        {
+          "path": "SmolLM2-1.7B-Instruct-Q8_0.gguf",
+          "sha256": "0f3fb091804c48a561b42a4ca1be9ce2c353017187f74c48f52299cae790abe5",
+          "size": 1820414624
+        },
+        {
+          "path": "Modelfile",
+          "sha256": "87c04c4c0f28d57f67d51ddac6562374b80827a90ff8463a4a3dc7b5b41ef8e7",
+          "size": 39
+        }
+      ],
+      "missing": [],
+      "model_id": "SmolLM",
+      "present_count": 2,
+      "required_count": 2,
+      "root": "/opt/llm/models/SmolLM"
+    }
+  },
+  "schema": 1
+}

@@ -1,0 +1,497 @@
+"""Single-GPU, fenced, bounded asynchronous ResourceManager core."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import math
+import secrets
+import time
+from collections import deque
+from dataclasses import dataclass
+from typing import AsyncIterator
+
+from services.llm.queue.contracts import ModelId
+from services.llm.resource_manager.contracts import CapacityProfile
+from services.llm.resource_manager.protocol import (
+    Capacity, EventKind, Failure, ProgressEvent, Provider, ProviderResponse,
+    ResourceManagerClient, SessionInfo, Submission,
+)
+
+
+class ResourceManagerError(RuntimeError):
+    def __init__(self, failure: Failure):
+        super().__init__(failure.message)
+        self.failure = failure
+
+
+@dataclass
+class _Work:
+    session: SessionInfo
+    request_id: str
+    attempt: str
+    identity: str
+    payload: bytes
+    task: asyncio.Task[None] | None = None
+    cancelled: bool = False
+    slot_started: float | None = None
+
+    @property
+    def key(self) -> tuple[str, str, str]:
+        return self.session.session_token, self.request_id, self.attempt
+
+
+class ResourceManager(ResourceManagerClient):
+    """Provider injection is only for this in-process precursor boundary."""
+
+    def __init__(self, *, cleanup_timeout: float = 10.0, stop_timeout: float = 10.0,
+                 load_timeout: float = 60.0, max_events: int = 1024, max_sessions: int = 16):
+        for value, name in ((cleanup_timeout, "cleanup_timeout"), (stop_timeout, "stop_timeout"),
+                            (load_timeout, "load_timeout")):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be a positive finite number")
+        if isinstance(max_events, bool) or not isinstance(max_events, int) or max_events < 1:
+            raise ValueError("max_events must be a positive integer")
+        if isinstance(max_sessions, bool) or not isinstance(max_sessions, int) or max_sessions < 1:
+            raise ValueError("max_sessions must be a positive integer")
+        self.cleanup_timeout, self.stop_timeout, self.load_timeout, self.max_events, self.max_sessions = cleanup_timeout, stop_timeout, load_timeout, max_events, max_sessions
+        self._lock = asyncio.Lock()
+        self._lifecycle_lock = asyncio.Lock()
+        self._session: SessionInfo | None = None
+        self._profile: CapacityProfile | None = None
+        self._provider: Provider | None = None
+        self._available = True
+        self._buffer: deque[_Work] = deque()
+        self._active: dict[tuple[str, str, str], _Work] = {}
+        self._records: dict[str, dict[str, tuple[str, Submission]]] = {}
+        self._request_attempts: dict[str, dict[tuple[str, str], str]] = {}
+        self._pair_records: dict[str, dict[tuple[str, str], Submission]] = {}
+        self._validating: dict[str, dict[str, tuple[str, str]]] = {}
+        self._start_records: dict[str, tuple[tuple[object, ...], SessionInfo]] = {}
+        self._stop_records: dict[str, tuple[tuple[object, ...], str]] = {}
+        self._cancel_records: dict[str, tuple[tuple[object, ...], bool]] = {}
+        self._events: dict[str, deque[ProgressEvent]] = {}
+        self._event_number: dict[str, int] = {}
+        self._completion_number: dict[str, int] = {}
+        self._waiters: dict[str, list[asyncio.Future[None]]] = {}
+        self._terminal: set[str] = set()
+        self._session_order: deque[str] = deque()
+        self._expired_sessions: set[str] = set()
+        self._generation = 0
+        self._abandoned: set[asyncio.Task[object]] = set()
+        # Lifecycle calls (not just executions) remain residency fences when a
+        # timeout detaches them from their caller.  In particular, unload must
+        # never race a timed-out load.
+        self._lifecycle_tasks: set[asyncio.Task[object]] = set()
+        self._cancelled_requests: set[tuple[str, str]] = set()
+
+    @staticmethod
+    def _key(value: str, name: str) -> None:
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{name} must be non-empty")
+
+    def _abandon(self, task: asyncio.Task[object]) -> None:
+        self._abandoned.add(task)
+        def consume(done: asyncio.Task[object]) -> None:
+            self._abandoned.discard(done)
+            try: done.exception()
+            except BaseException: pass
+        task.add_done_callback(consume)
+
+    async def _bounded(self, operation, deadline: float) -> object:
+        task = asyncio.create_task(operation)
+        self._lifecycle_tasks.add(task)
+        task.add_done_callback(self._lifecycle_tasks.discard)
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            done, pending = await asyncio.wait((task,), timeout=remaining)
+        except asyncio.CancelledError:
+            self._abandon(task)
+            raise
+        if pending:
+            self._abandon(task)
+            raise self._error("lifecycle_timeout", "provider lifecycle operation timed out")
+        return task.result()
+
+    @staticmethod
+    def _error(code: str, message: str, retryable: bool = False) -> ResourceManagerError:
+        return ResourceManagerError(Failure(code, message, retryable))
+
+    @staticmethod
+    def _identity(request_id: str, attempt: str, payload: bytes, context_size, bucket_identity) -> str:
+        return hashlib.sha256(payload + repr((request_id, attempt, context_size, bucket_identity)).encode()).hexdigest()
+
+    def _validate_profile(self, model_id: ModelId, profile: CapacityProfile) -> None:
+        if profile.model_id != ModelId(model_id):
+            raise self._error("invalid_profile", "profile model does not match requested model")
+
+    async def start_session(self, scheduler_id: str, model_id: ModelId,
+                            profile: CapacityProfile, provider: Provider, *,
+                            idempotency_key: str) -> SessionInfo:
+        self._key(idempotency_key, "idempotency_key")
+        args = (scheduler_id, ModelId(model_id), profile, provider)
+        async with self._lifecycle_lock:
+            previous = self._start_records.get(idempotency_key)
+            if previous:
+                if previous[0] != args:
+                    raise self._error("idempotency_conflict", "start key arguments differ")
+                if self._session == previous[1]:
+                    return previous[1]
+                raise self._error("scheduler_superseded", "start replay belongs to an old session")
+            self._validate_profile(model_id, profile)
+            async with self._lock:
+                if not self._available:
+                    raise self._error("resource_manager_unavailable", "cleanup has failed")
+                old = self._session
+                old_provider = self._provider
+                if old:
+                    # This is the synchronous residency fence, before cleanup awaits.
+                    self._session = None
+                    self._available = False
+                    self._buffer.clear()
+                    for work in self._active.values():
+                        work.cancelled = True
+                    self._terminal.add(old.session_token)
+                    self._emit_locked(old, EventKind.SESSION_INVALIDATED,
+                                      failure=Failure("scheduler_superseded", "session was replaced", False))
+                generation = max(self._generation + 1, old.generation + 1 if old else 1)
+            if old and old_provider:
+                await self._cleanup(old_provider, timeout=self.cleanup_timeout)
+            async with self._lock:
+                if not self._available:
+                    raise self._error("resource_manager_unavailable", "cleanup has failed")
+                info = SessionInfo(scheduler_id, secrets.token_urlsafe(24), ModelId(model_id), generation)
+                self._session, self._profile, self._provider = info, profile, provider
+                self._available = False  # remains closed through validate/load/ready
+            deadline = time.monotonic() + self.load_timeout
+            try:
+                await self._bounded(provider.validate(profile), deadline)
+                await self._bounded(provider.load(profile), deadline)
+                await self._bounded(provider.ready(), deadline)
+            except BaseException as exc:
+                async with self._lock:
+                    if self._session == info: self._available = False
+                if isinstance(exc, ResourceManagerError): raise
+                raise self._error("model_load_failed", str(exc)) from exc
+            async with self._lock:
+                if self._session != info:
+                    raise self._error("scheduler_superseded", "session was replaced")
+                self._available = True
+                self._generation = info.generation
+                self._records[info.session_token] = {}
+                self._request_attempts[info.session_token] = {}
+                self._pair_records[info.session_token] = {}
+                self._validating[info.session_token] = {}
+                self._cancelled_requests = {item for item in self._cancelled_requests
+                                            if item[0] != info.session_token}
+                self._events[info.session_token] = deque(maxlen=self.max_events)
+                self._session_order.append(info.session_token)
+                while len(self._session_order) > self.max_sessions:
+                    expired = self._session_order.popleft()
+                    self._events.pop(expired, None)
+                    self._expired_sessions.add(expired)
+                self._event_number[info.session_token] = 0
+                self._completion_number[info.session_token] = 0
+                self._start_records[idempotency_key] = (args, info)
+                return info
+
+    async def _cleanup(self, provider: Provider, *, timeout: float | None = None) -> None:
+        timeout = self.cleanup_timeout if timeout is None else timeout
+        deadline = time.monotonic() + timeout
+        try:
+            async with self._lock:
+                works = tuple(self._active.values())
+                execute_tasks = tuple(work.task for work in works if work.task and not work.task.done())
+                lifecycle_tasks = tuple(task for task in self._lifecycle_tasks if not task.done())
+            # Cancellation is advisory and may itself hang or suppress task
+            # cancellation.  Never await it unboundedly, and never unload
+            # while tracked provider execution remains unfinished.
+            cancel_tasks = tuple(asyncio.create_task(provider.cancel(work.request_id)) for work in works)
+            if cancel_tasks:
+                _, cancel_pending = await asyncio.wait(cancel_tasks, timeout=max(0, deadline-time.monotonic()))
+                for task in cancel_pending: self._abandon(task)
+                for task in cancel_tasks:
+                    if task not in cancel_pending: self._abandon(task)
+            tracked_tasks = tuple(dict.fromkeys((*execute_tasks, *lifecycle_tasks)))
+            if tracked_tasks:
+                _, execute_pending = await asyncio.wait(tracked_tasks, timeout=max(0, deadline-time.monotonic()))
+                if execute_pending:
+                    for task in execute_pending: self._abandon(task)
+                    raise self._error("cleanup_timeout", "provider execution did not finish")
+            await self._bounded(provider.unload(), deadline)
+            if not await self._bounded(provider.verify_cleanup(), deadline):
+                raise self._error("cleanup_failed", "provider cleanup verification failed")
+            async with self._lock:
+                self._active.clear()
+                self._available = True
+        except ResourceManagerError:
+            async with self._lock: self._available = False
+            raise
+        except Exception as exc:
+            async with self._lock: self._available = False
+            raise self._error("cleanup_failed", str(exc)) from exc
+
+    def _emit_locked(self, session: SessionInfo, kind: EventKind, *, request_id=None,
+                     attempt=None, result=None, failure=None, timing=None, complete=False) -> None:
+        token = session.session_token
+        self._event_number[token] = self._event_number.get(token, 0) + 1
+        if kind is EventKind.RESPONSE_FINISHED:
+            self._completion_number[token] = self._completion_number.get(token, 0) + 1
+        event = ProgressEvent(self._event_number[token], self._completion_number.get(token, 0), kind,
+                              request_id, attempt, token, session.generation, result, failure,
+                              timing, complete)
+        self._events.setdefault(token, deque(maxlen=self.max_events)).append(event)
+        for waiter in self._waiters.pop(token, []):
+            if not waiter.done(): waiter.set_result(None)
+
+    def _check_session_locked(self, token: str) -> tuple[SessionInfo, CapacityProfile, Provider]:
+        if not self._session or self._session.session_token != token:
+            raise self._error("scheduler_superseded", "unknown or stale session")
+        if not self._profile or not self._provider:
+            raise self._error("resource_manager_unavailable", "session is not ready")
+        return self._session, self._profile, self._provider
+
+    async def submit(self, session_token: str, request_id: str, attempt: str, payload: bytes,
+                     *, idempotency_key: str, context_size=None, bucket_identity=None) -> Submission:
+        self._key(idempotency_key, "idempotency_key")
+        if not isinstance(payload, bytes) or not payload:
+            raise self._error("invalid_input", "payload must be non-empty bytes")
+        identity = self._identity(request_id, attempt, payload, context_size, bucket_identity)
+        async with self._lock:
+            session, profile, provider = self._check_session_locked(session_token)
+            if (session_token, request_id) in self._cancelled_requests:
+                raise self._error("request_cancelled", "request was cancelled")
+            known = self._records[session_token].get(idempotency_key)
+            if known:
+                if known[0] != identity: raise self._error("idempotency_conflict", "payload differs")
+                return known[1]
+            pair = (request_id, attempt)
+            for work in (*self._active.values(), *self._buffer):
+                if work.request_id == request_id and work.attempt != attempt:
+                    raise self._error("request_in_flight", "another attempt for request is active")
+            validating = self._validating[session_token].get(request_id)
+            if validating and validating[0] != attempt:
+                raise self._error("request_in_flight", "another attempt is being validated")
+            self._validating[session_token][request_id] = (attempt, identity)
+            old_identity = self._request_attempts[session_token].get(pair)
+            if old_identity and old_identity != identity:
+                raise self._error("idempotency_conflict", "request and attempt identity differs")
+            if old_identity == identity:
+                replay = self._pair_records[session_token][pair]
+                self._records[session_token][idempotency_key] = (identity, replay)
+                return replay
+            if not self._available:
+                raise self._error("resource_manager_unavailable", "admission is closed")
+        if not profile.accepts_request(context_size, bucket_identity):
+            async with self._lock:
+                if self._validating[session_token].get(request_id) == (attempt, identity):
+                    self._validating[session_token].pop(request_id, None)
+            raise self._error("invalid_input", "request does not match exact capacity profile")
+        try:
+            await provider.validate_input(payload, context_size=context_size, bucket_identity=bucket_identity)
+        except ResourceManagerError:
+            raise
+        except Exception as exc:
+            raise self._error("invalid_input", str(exc)) from exc
+        finally:
+            async with self._lock:
+                if self._validating[session_token].get(request_id) == (attempt, identity):
+                    self._validating[session_token].pop(request_id, None)
+        async with self._lock:
+            # Fence and replay are both repeated after the await to close duplicate races.
+            session, profile, provider = self._check_session_locked(session_token)
+            if (session_token, request_id) in self._cancelled_requests:
+                self._emit_locked(session, EventKind.CANCELLED, request_id=request_id, attempt=attempt)
+                raise self._error("request_cancelled", "request was cancelled")
+            if self._validating[session_token].get(request_id) == (attempt, identity):
+                self._validating[session_token].pop(request_id, None)
+            known = self._records[session_token].get(idempotency_key)
+            if known:
+                if known[0] != identity: raise self._error("idempotency_conflict", "payload differs")
+                return known[1]
+            pair = (request_id, attempt)
+            for work in (*self._active.values(), *self._buffer):
+                if work.request_id == request_id and work.attempt != attempt:
+                    raise self._error("request_in_flight", "another attempt for request is active")
+            old_identity = self._request_attempts[session_token].get(pair)
+            if old_identity and old_identity != identity:
+                raise self._error("idempotency_conflict", "request and attempt identity differs")
+            if old_identity == identity:
+                replay = self._pair_records[session_token][pair]
+                self._records[session_token][idempotency_key] = (identity, replay)
+                return replay
+            p = profile.optimal_parallelism
+            if len(self._active) + len(self._buffer) >= 2 * p:
+                return Submission(False, request_id, attempt, session_token, session.generation, True)
+            result = Submission(True, request_id, attempt, session_token, session.generation)
+            self._records[session_token][idempotency_key] = (identity, result)
+            self._request_attempts[session_token][pair] = identity
+            self._pair_records[session_token][pair] = result
+            work = _Work(session, request_id, attempt, identity, bytes(payload))
+            if len(self._active) < p:
+                self._active[work.key] = work
+                self._emit_locked(session, EventKind.ADMISSION, request_id=request_id, attempt=attempt)
+                work.slot_started = time.monotonic()
+                work.task = asyncio.create_task(self._run(work, provider))
+            else:
+                self._buffer.append(work)
+                self._emit_locked(session, EventKind.BUFFERED, request_id=request_id, attempt=attempt)
+            return result
+
+    @staticmethod
+    def _provider_failure(exc: BaseException) -> Failure:
+        if isinstance(exc, ResourceManagerError): return exc.failure
+        failure = getattr(exc, "failure", None)
+        if isinstance(failure, Failure): return failure
+        return Failure("provider_execution_failed", str(exc), True)
+
+    async def _run(self, work: _Work, provider: Provider) -> None:
+        response: ProviderResponse | None = None
+        failure: Failure | None = None
+        cancelled = False
+        try:
+            response = await provider.execute(work.request_id, work.payload)
+            if not isinstance(response, ProviderResponse) or not isinstance(response.result, bytes) or not response.result:
+                failure = Failure("malformed_provider_response", "provider returned invalid result", False)
+            elif response.gpu_timing_complete and (isinstance(response.time_on_gpu_ms, bool) or
+                                                    not isinstance(response.time_on_gpu_ms, int) or response.time_on_gpu_ms < 0):
+                failure = Failure("malformed_provider_response", "invalid complete GPU timing", False)
+        except asyncio.CancelledError:
+            cancelled = True
+        except BaseException as exc:
+            failure = self._provider_failure(exc)
+        finally:
+            async with self._lock:
+                self._active.pop(work.key, None)  # exact session/request/attempt key
+                if cancelled:
+                    self._emit_locked(work.session, EventKind.CANCELLED, request_id=work.request_id, attempt=work.attempt)
+                elif failure:
+                    if response is not None:
+                        response_timing = (response.time_on_gpu_ms
+                                           if response.gpu_timing_complete
+                                           and isinstance(response.time_on_gpu_ms, int)
+                                           and not isinstance(response.time_on_gpu_ms, bool)
+                                           and response.time_on_gpu_ms >= 0 else None)
+                        self._emit_locked(work.session, EventKind.RESPONSE_FINISHED,
+                                          request_id=work.request_id, attempt=work.attempt,
+                                          timing=response_timing, complete=response_timing is not None)
+                    self._emit_locked(work.session, EventKind.FAILURE, request_id=work.request_id,
+                                      attempt=work.attempt, failure=failure)
+                else:
+                    current = self._session == work.session and not work.cancelled
+                    # Incomplete provider timing is explicitly null, never inferred.
+                    timing = (response.time_on_gpu_ms if response and response.gpu_timing_complete
+                              and isinstance(response.time_on_gpu_ms, int)
+                              and not isinstance(response.time_on_gpu_ms, bool)
+                              and response.time_on_gpu_ms >= 0 else None)
+                    self._emit_locked(work.session, EventKind.RESPONSE_FINISHED, request_id=work.request_id,
+                                      attempt=work.attempt, result=response.result if current else None,
+                                      timing=timing, complete=timing is not None)
+                if self._session == work.session and self._profile and self._available:
+                    while self._buffer and len(self._active) < self._profile.optimal_parallelism:
+                        nxt = self._buffer.popleft()
+                        if nxt.cancelled: continue
+                        self._active[nxt.key] = nxt
+                        self._emit_locked(nxt.session, EventKind.ADMISSION, request_id=nxt.request_id, attempt=nxt.attempt)
+                        nxt.slot_started = time.monotonic()
+                        nxt.task = asyncio.create_task(self._run(nxt, provider))
+
+    async def cancel_request(self, session_token: str, request_id: str, *, idempotency_key: str) -> bool:
+        self._key(idempotency_key, "idempotency_key")
+        args = (session_token, request_id)
+        async with self._lock:
+            old = self._cancel_records.get(idempotency_key)
+            if old:
+                if old[0] != args: raise self._error("idempotency_conflict", "cancel arguments differ")
+                self._check_session_locked(session_token)
+                return old[1]
+            session, _, provider = self._check_session_locked(session_token)
+            if self._validating[session_token].get(request_id):
+                self._cancelled_requests.add((session_token, request_id))
+                self._validating[session_token].pop(request_id, None)
+                self._emit_locked(session, EventKind.CANCELLED, request_id=request_id)
+                self._cancel_records[idempotency_key] = (args, True)
+                return True
+            for work in tuple(self._buffer):
+                if work.request_id == request_id:
+                    self._buffer.remove(work); work.cancelled = True
+                    self._emit_locked(session, EventKind.CANCELLED, request_id=request_id, attempt=work.attempt)
+                    self._cancel_records[idempotency_key] = (args, True)
+                    return True
+            work = next((item for item in self._active.values() if item.request_id == request_id), None)
+            if not work:
+                self._cancel_records[idempotency_key] = (args, False)
+                return False
+            work.cancelled = True
+            self._cancel_records[idempotency_key] = (args, True)
+        try:
+            await self._bounded(provider.cancel(request_id), time.monotonic() + self.cleanup_timeout)
+        except Exception:
+            pass
+        return True
+
+    async def stop_session(self, session_token: str, *, reason: str = "stopped",
+                           idempotency_key: str) -> None:
+        self._key(idempotency_key, "idempotency_key")
+        args = (session_token, reason)
+        async with self._lifecycle_lock:
+            old = self._stop_records.get(idempotency_key)
+            if old:
+                if old[0] != args: raise self._error("idempotency_conflict", "stop arguments differ")
+                return
+            async with self._lock:
+                if not self._session or self._session.session_token != session_token:
+                    raise self._error("scheduler_superseded", "unknown or stale session")
+                session, provider = self._session, self._provider
+                self._session = None; self._available = False; self._buffer.clear()
+                for work in self._active.values(): work.cancelled = True
+                self._terminal.add(session_token)
+                self._emit_locked(session, EventKind.SESSION_INVALIDATED,
+                                  failure=Failure(reason, reason, False))
+            if provider:
+                try: await self._cleanup(provider, timeout=self.stop_timeout)
+                except Exception: pass
+            async with self._lock:
+                self._provider = None; self._profile = None
+                self._stop_records[idempotency_key] = (args, session_token)
+
+    async def get_capacity(self, session_token: str) -> Capacity:
+        async with self._lock:
+            session, profile, _ = self._check_session_locked(session_token)
+            p = profile.optimal_parallelism
+            free = 2 * p - len(self._active) - len(self._buffer) if self._available else 0
+            return Capacity(profile, p, p, free)
+
+    async def watch_progress(self, session_token: str, after_sequence: int = 0) -> AsyncIterator[ProgressEvent]:
+        if isinstance(after_sequence, bool) or not isinstance(after_sequence, int) or after_sequence < 0:
+            raise self._error("invalid_cursor", "cursor must be a nonnegative integer")
+        while True:
+            async with self._lock:
+                events = self._events.get(session_token)
+                if events is None:
+                    if session_token in self._expired_sessions:
+                        raise self._error("cursor_expired", "session history is no longer retained")
+                    raise self._error("scheduler_superseded", "unknown session")
+                if after_sequence > self._event_number.get(session_token, 0):
+                    raise self._error("invalid_cursor", "cursor is in the future")
+                if events and after_sequence < events[0].sequence - 1:
+                    raise self._error("cursor_expired", "progress cursor is no longer retained")
+                pending = [event for event in events if event.sequence > after_sequence]
+                if not pending:
+                    if session_token in self._terminal: return
+                    waiter = asyncio.get_running_loop().create_future()
+                    self._waiters.setdefault(session_token, []).append(waiter)
+            if not pending:
+                try:
+                    await waiter
+                finally:
+                    async with self._lock:
+                        waiters = self._waiters.get(session_token, [])
+                        if waiter in waiters: waiters.remove(waiter)
+                        if not waiters: self._waiters.pop(session_token, None)
+                continue
+            for event in pending:
+                yield event
+            after_sequence = pending[-1].sequence
+            if session_token in self._terminal and any(e.kind is EventKind.SESSION_INVALIDATED for e in pending):
+                return

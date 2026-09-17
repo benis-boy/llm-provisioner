@@ -46,6 +46,23 @@ class ResultTests(unittest.TestCase):
             publisher.close()
             queue.close()
 
+    def test_connection_scoped_publish_joins_queue_transaction_and_replays(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "results"
+            state = Path(directory) / "shared.sqlite"
+            results = ResultStore(root)
+            reference = results.write(b"result")
+            publisher = LocalPublisher(results, state)
+            queue = QueueStore(state, "s", ModelId.SMOLLM)
+            queue.db.execute("BEGIN IMMEDIATE")
+            self.assertTrue(publisher.publish_on_connection(queue.db, reference, "key"))
+            queue.db.execute("COMMIT")
+            queue.db.execute("BEGIN IMMEDIATE")
+            self.assertFalse(publisher.publish_on_connection(queue.db, reference, "key"))
+            queue.db.execute("COMMIT")
+            publisher.close()
+            queue.close()
+
 
 if __name__ == "__main__":
     unittest.main()

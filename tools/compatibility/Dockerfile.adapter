@@ -1,0 +1,13 @@
+# Offline-only image for the real services.llm.providers.SmolLMProvider check.
+ARG BASE_IMAGE=llm-compatibility-spike:candidate
+FROM ${BASE_IMAGE}
+ENV PYTHONUNBUFFERED=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+    HF_DATASETS_OFFLINE=1 NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost
+WORKDIR /opt/llm
+COPY services/ /opt/llm/services/
+COPY tools/compatibility/adapter_check.py /opt/llm/adapter_check.py
+COPY .compatibility/adapter-deps/wheelhouse/ /opt/llm/adapter-wheelhouse/
+COPY .compatibility/adapter-deps/requirements.lock /opt/llm/adapter-requirements.lock
+RUN /opt/venv/bin/python -m pip install --no-index --no-cache-dir --require-hashes \
+    --find-links=/opt/llm/adapter-wheelhouse -r /opt/llm/adapter-requirements.lock
+ENTRYPOINT ["/opt/venv/bin/python", "/opt/llm/adapter_check.py"]

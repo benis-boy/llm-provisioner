@@ -8,10 +8,14 @@ without losing accepted requests or reporting misleading progress.
 
 This checkout now contains a Python contract foundation, synchronous SQLite WAL
 queue primitives, content-addressed result storage, a durable local publisher,
-durable optional-function intent with fail-closed claim gates, and focused
-unit/local integration tests. It does **not** yet contain the async
-QueueScheduler, ResourceManager server, provider adapters, production image, or
-provisioning runtime. Unchecked work remains target-state design. Historical
+durable optional-function evaluation, an async QueueScheduler, a transport-neutral
+ResourceManager core, RM and scheduler HTTP/JSON/SSE bindings, artifact verification
+and experimental compatibility tools. A read-only selected-artifact verification
+HTTP endpoint and read-only exact measured-profile validation also exist. It does
+**not** yet contain capacity-measurement or health HTTP bindings, a production image,
+complete three-model production adapters, or measured provisioning runtime. The
+installable SmolLM adapter and Linux GPU-ownership proof now have local regression
+coverage, but no real-adapter GPU/deployment verification. Unchecked work remains target-state design. Historical
 capacity notes are not implementation evidence.
 
 ### Implementation progress (2026-09-16)
@@ -24,12 +28,16 @@ Work is tracked in logical slices, not whole-phase completion claims. See
   function, provisioning-bucket and profile contracts; status adjacency table;
   decision owners and operational blockers recorded.
 - [ ] **Phase 0 exit:** fully validate OpenAPI and client/server bindings; finish
-  profile SQLite schema and exact artifact manifests after compatibility review.
-  Current OpenAPI tests are text-contract checks, not a YAML/OpenAPI validator.
-- [ ] **Phase 1 — Compatibility spike and production image:** Docker and NVIDIA
-  GPU access are now verified through the host daemon. The three-model offline
-  compatibility matrix, exact artifacts and production runtime remain unverified;
-  no runtime/dependency pins or artifact hashes have been invented. See
+  profile runtime integration after compatibility review. Durable profile SQLite
+  storage and strict selected-artifact manifests now exist as precursor slices.
+  Parsed OpenAPI validation and RM/scheduler loopback binding tests now pass;
+   future capacity-measurement and health operations retain
+  their full target contracts.
+- [ ] **Phase 1 — Compatibility spike and production image:** Docker/NVIDIA and
+  candidate three-model offline small and configured upper-fixture inference,
+  RM cancellation fencing and process cleanup passed with verified selected
+  artifacts. Full compatibility exit and production runtime
+  remain unproved; candidate pins are not approved production pins. See
   [environment evidence](implementation-decisions.md#environment-reassessment-2026-09-16).
 - [x] **Slice B — Durable queue primitives:** SQLite WAL transactions, exact
   enqueue idempotency, immutable intent references, separate ordered positions,
@@ -49,17 +57,94 @@ Work is tracked in logical slices, not whole-phase completion claims. See
 - [ ] **Phase 2 exit:** integrate real ResourceManager session reconciliation
   and outbox delivery; finish operation-replay and guarded-transition behavioral
   coverage.
-- [ ] **Phase 3 — Async QueueScheduler:** bounded eligibility scans, registered
-  ready/template execution, watch delivery, completion-only watchdog, dispatch,
-  cancellation reconciliation and full async lifecycle remain unimplemented.
+- [x] **Slice F — Evaluated eligibility:** bounded FIFO scans, sync/async
+  ready/template execution, dependency result resolution and single-use durable
+  version/session/intent-fenced claim capabilities.
+- [ ] **Phase 3 — Async QueueScheduler:** coordinator, dispatch replay, watch,
+  completion watchdog, cancellation and crash publication recovery implemented
+  locally. Review-driven race fixes passed local verification; production-boundary
+  integration and complete transition/insertion coverage remain open.
+- [ ] **ResourceManager precursor:** typed in-process protocol and fake-provider
+  lifecycle, exclusive residency fences, p+p admission, bounded cleanup and event
+  replay implemented. Real experimental RM-driven lifecycle harness passed;
+   RM HTTP binding has local loopback proof; full production adapter integration remains open.
+- [x] **RM transport slice:** typed HTTP client, server-owned profile/provider
+  lookup, trusted shared content references, bounded JSON/SSE, request-level
+  cancellation, typed non-failure backpressure and cursor replay/expiry.
+  Scheduler-over-HTTP exact publication and all three model selector shapes
+  pass with fake providers. See [HTTP boundary](resource-manager-http.md).
 - [ ] **Phase 4 — ResourceManager and real adapters.**
+- [x] **SmolLM adapter slice:** existing supervisor-owned loopback Ollama client,
+   selected manifest/GGUF identity, bounded local import and raw ASCII framing,
+   configured parallelism, typed supervisor/runner readiness, and verified cleanup.
+   Failed initial RM lifecycle now cleans up before permitting another start;
+   unproved cleanup remains fenced. This is not production packaging or measured capacity.
+- [x] **Linux GPU ownership proof slice:** lazy NVML access, empty compute/graphics
+   baseline, exact physical GPU, bounded procfs ancestry and PID-reuse checks,
+   and cleanup absence. Real capture requires explicit host-PID-namespace
+   attestation; deployment must supply authoritative procfs and supervisor identity.
+   Current evidence uses synthetic NVML/procfs, not real GPU execution.
+- [x] **Scheduler transport and control replay slice:** application-configured
+  scheduler/function registries, six HTTP operations, durable keyed start/cancel/stop,
+  strict bounded JSON and immutable request-specific SSE history. Live replay uses
+  bounded batches without starvation from unrelated events; terminal reconnects
+  close and unavailable legacy history fails before headers. Publication retains
+  its cancellation/session fence for both shared and separate receipt databases.
+  These are local fake-provider tests, not production restart or GPU proof.
+  See [scheduler HTTP boundary](scheduler-http.md).
 - [ ] **Phase 5 — Offline provisioner and measured capacity profiles.**
+- [x] **Artifact-volume slice:** serialized, selected-file-only offline copying,
+  source-independent content identities, verified digest reuse and atomic `current`
+  selection. Corruption, unsafe paths and interrupted copying fail closed; prior
+  complete volumes are retained. See [artifact-volume boundary](artifact-volume.md).
+- [x] **Read-only artifact verification HTTP slice:** configured volume IDs,
+  strict bounded JSON, exact selected-file/hash verification and minimal identity
+  summaries. Hashing runs off the event loop with bounded concurrency; timeout
+  and disconnect retain worker slots until hashing exits. No copying, download,
+  model loading, readiness or measured-capacity claim is made by this endpoint.
+- [x] **Profile registry precursor:** SQLite WAL/FULL immutable records, draft
+  exclusion, exact identity/closest context lookup, evidence hashes and strict
+  schema checks. Supplied successful waves must support the selected throughput
+  concurrency and 2% tie rule. No actual capacity measurements or automatic
+  production runtime profile integration are claimed. The HTTP binding resolves
+   supplied measured registry records; see [profile boundary](capacity-profiles.md).
+- [x] **Read-only profile-validation HTTP slice:** strict full-profile input,
+   server-owned current identities and registry paths, exact measured-record and
+   sample comparison, read-only SQLite access, bounded body/worker admission and
+   retained worker slots across timeout/disconnect. This validates supplied
+   evidence; it does not measure capacity or assert runtime readiness.
 - [ ] **Phase 6 — Production E2E, observability, deployment and runbooks.**
 
-Verification: `python3 -m unittest discover -s tests -p 'test_*.py'` passes
-**47 tests**; `python3 -m compileall -q services tests` passes. These are unit/local
-SQLite integration results, **not** qualifying provider/GPU E2E evidence. No leaf
-goal is `done`.
+Verification: **294 tests passed** in 31.593 seconds using
+`.venv/bin/python -W error -m unittest discover -s tests -p 'test_*.py'`; compilation of services,
+tests and tools passed. The focused scheduler/HTTP/publication suites passed
+**86 tests**; the stop-before-publication regression passed five repeated runs.
+The profile/artifact HTTP/profile-store/OpenAPI focused suites passed **50 tests**.
+The compatibility input/runtime/packaging suites passed **36 tests**.
+The latest GPU-proof/provider/RM/packaging/input-bound focused suites passed
+**60 tests**. CLI timeout/overflow cleanup passed three repeated runs with forced
+garbage collection and an unraisable-exception hook, without pipe/transport warnings.
+The separate actual-adapter harness passed **9 local tests**, including owned
+orphan-group and cancelled-launch cleanup. Its hash-locked dependency layer built
+with networking disabled. Real GPU execution is currently **environment-blocked**:
+the read-only Docker-host procfs binding did not provide `/host/proc/self/stat`
+(`procfs_missing`). The owned container was removed and verified absent. No
+real-adapter inference/residency/baseline success is claimed; further GPU testing
+requires operator repair of host procfs availability and NVML namespace alignment.
+See `docs/adapter-gpu-check.md` for the exact runtime boundary and commands.
+Review regressions were repaired.
+These are unit/local integration results, **not** qualifying provider/GPU E2E.
+The expanded three-model RM GPU candidate check passed separately, including
+normal lifecycle (41 seconds) and injected child-process loss (36 seconds).
+Both scenarios passed again after the bounded raw-input and image-packaging
+repairs. SmolLM now proves a conservative no-truncation bound for its configured
+printable-ASCII bucket, not arbitrary UTF-8 or model-maximum inputs.
+All three failed attempts were fenced and each owned process group disappeared
+with the NVML process baseline restored before the next load. Execution-entry
+notification is not proof of GPU-kernel entry or interruptibility. This is not
+the full compatibility matrix or measured capacity acceptance.
+See the [proof inventory](../.opencode/skills/goal-oriented-design/references/e2e-proof.md).
+No leaf goal is `done`.
 
 ## 2. Scope and fixed decisions
 
@@ -814,8 +899,8 @@ tests/e2e/
    Platform implementation owns remaining validated bindings.
 3. Settled: consumer-registered Python sync/async functions; descriptors contain
    a name, JSON-compatible arguments and dependency result IDs. Application
-    implementation owns runtime execution; durable descriptor integration is
-    implemented in Slice E, with claims blocked until evaluation exists.
+     implementation owns runtime execution; durable descriptor integration is
+     implemented in Slice E and fenced evaluation in Slice F.
 4. Settled: `publish(request_id, attempt_token, result_reference, idempotency_key)`;
    local publication durably acknowledges verified content-addressed bytes.
    External publishers own duplicate-key no-ops; queue implementation owns delivery.

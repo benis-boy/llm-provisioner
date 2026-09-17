@@ -2,15 +2,26 @@
 
 ## Current status
 
-G1.1, G1.2, G2.1, G2.2, G3.1 and G3.2 are **partial**: synchronous SQLite
-queue/result primitives exist, but async scheduler and real provider boundaries
-do not. G4.1, G4.2 and G4.3 remain **target** with contract definitions only.
+G1.1 through G4.3 are **partial**: SQLite queue/result primitives, bounded
+optional-function evaluation, an async scheduler, a transport-neutral RM and
+candidate offline tooling exist. Real production provider/server boundaries,
+measured profiles and production packaging remain incomplete.
 No qualifying production-boundary E2E proof exists and no leaf is done.
 
-## Local regression inventory (2026-09-16)
+## Local regression inventory (2026-09-17)
 
-Command: `python3 -m unittest discover -s tests -p 'test_*.py'` — **47 passed**.
-`python3 -m compileall -q services tests` also passed. All entries below are
+Latest verification: `.venv/bin/python -W error -m unittest discover -s tests -p 'test_*.py'` —
+**294 passed** in 31.593 seconds. Adapter-harness verification passed **9 tests**.
+Earlier GPU-proof/provider/RM/packaging/input-bound
+verification passed **60 tests**. Focused profile/artifact HTTP/profile-store/OpenAPI
+verification passed **50 tests**. Focused scheduler/HTTP/publication verification
+passed **86 tests**, and the stop-before-publication regression passed five
+repeated runs. Earlier focused compatibility verification passed **22 tests**
+with warnings treated as errors. Artifact-volume/compatibility-input verification
+passed **18 tests** before the later compatibility additions.
+Earlier watchdog regressions and a harness live-watch hang were
+repaired and reverified. `.venv/bin/python -m compileall -q services tests tools`
+passed. All entries below are
 **unit** evidence (including local integration tests); none substitutes for
 required service/provider E2E. Tests own temporary directories, SQLite databases,
 result files, receipts and subprocess cleanup.
@@ -18,25 +29,189 @@ result files, receipts and subprocess cleanup.
 | Goals | Stable suite/test IDs | Evidence and limits |
 |---|---|---|
 | G1.1 | `tests.integration.test_queue_recovery`; `tests.unit.test_queue_regressions.QueueRegressionTests.test_abrupt_subprocess_exit_preserves_request_and_submit_outbox`; `test_same_owner_recovery_preserves_handoff_and_fences_old_attempt` in the same class | WAL crash/reopen, retained handoff and local session replacement; no RM reconciliation |
-| G1.2 | `tests.unit.test_results`; `tests.unit.test_store`; `tests.unit.test_queue_regressions.QueueRegressionTests.test_generic_handoff_outbox_ack_is_rejected` | Content-addressed result verification, durable publisher receipt replay, guarded handoff; external publication/cancellation races await delivery coordinator |
+| G1.2 | `tests.unit.test_results`; `tests.unit.test_store`; `tests.unit.test_queue_regressions.QueueRegressionTests.test_generic_handoff_outbox_ack_is_rejected` | Content-addressed result verification, durable publisher receipt replay, guarded handoff; no external publisher E2E |
 | G2.1 | `tests.unit.test_contracts`; `tests.unit.test_queue_regressions.QueueRegressionTests.test_duplicate_finish_attempt_does_not_change_existing_telemetry` | All 36 adjacency pairs, status/timing primitives; not every guarded operation edge and no real GPU telemetry |
-| G2.2 | `tests.unit.test_queue_regressions.QueueRegressionTests.test_cancel_is_idempotent_in_scheduled_running_and_on_gpu`; `test_non_retryable_failure_stops_the_entire_queue` in same class | Local cancellation/abort fencing; no completed-response watchdog or provider cancellation |
+| G2.2 | `tests.unit.test_queue_regressions.QueueRegressionTests.test_cancel_is_idempotent_in_scheduled_running_and_on_gpu`; `test_non_retryable_failure_stops_the_entire_queue` in same class | Local cancellation/abort fencing; no production provider cancellation |
 | G1.2, G2.2 | `tests.unit.test_queue_regressions.QueueRegressionTests.test_retry_delays_are_5_10_20_30_30_across_reopen_and_claim_at_300_is_fenced` | Exact retry delay/cap and 300-second exhaustion across restart |
-| G3.1 | `tests.unit.test_store`; `tests.unit.test_function_intent.FunctionIntentTests.test_ready_template_and_both_are_fail_closed_without_attempts`; `test_descriptor_claim_is_fail_closed_without_side_effects` in the same class | Dependency-gated claims, cycle rejection and fail-closed descriptor-bearing claims while ungated work remains claimable; no bounded FIFO scan, function execution or readiness polling |
+| G3.1 | `tests.unit.test_store`; `tests.unit.test_function_intent.FunctionIntentTests.test_ready_template_and_both_are_fail_closed_without_attempts`; `test_descriptor_claim_is_fail_closed_without_side_effects` in the same class; `tests.unit.test_eligibility` | Dependency-gated claims, cycle rejection, bounded FIFO evaluation, optional sync/async functions and readiness polling; direct unevaluated descriptor claims remain fail-closed |
 | G1.1, G1.2, G3.1 | `tests.unit.test_function_intent.FunctionIntentTests.test_ready_and_template_round_trip_across_reopen`; `test_legacy_schema_upgrade_preserves_rows_and_old_fingerprint_replay`; `test_canonical_descriptor_replay_is_noop_but_changes_conflict`; `test_descriptor_idempotency_addition_removal_and_template_changes_conflict`; `test_post_accept_mutation_and_invalid_descriptor_cannot_change_intent`; `test_descriptor_cancel_stop_and_stale_session_are_fenced` in the same class; `tests.unit.test_contracts.ContractTests.test_request_record_validates_descriptor_shapes_and_declared_dependencies` | Canonical immutable accepted descriptor intent, recovery, additive legacy upgrade preserving pending work, idempotency conflicts, dependency-reference boundary and cancellation/session fences; local SQLite evidence only |
 | G3.2 | `tests.unit.test_queue_regressions.QueueRegressionTests.test_independent_connections_serialize_skip_line_insertions`; `test_closed_group_reopens_when_original_anchor_is_scheduled_by_retry` in same class | SQLite-linearized priority insertion and group reopening; no real dispatch-order E2E |
 
-OpenAPI tests are dependency-free text checks, **not** parser/schema validation.
+Additional **unit** suites (fake-provider/local integration, not production E2E):
+
+- `tests.unit.test_scheduler`: durable submit replay after lost acknowledgment,
+  crash handoff replay without calling public stop, explicit stop fences
+  publication, result persistence retries, watchdog and cancellation. Scheduler
+  and RM focused verification passed **45 tests** after review corrections.
+- `tests.unit.test_resource_manager`: session/attempt fencing, bounded admission,
+  cleanup, cancellation during validation and lifecycle timeout regressions;
+  latest isolated run **24 passed**.
+- `tests.unit.test_compatibility_inputs` and `tests.unit.test_spike`: selected
+  artifacts, safe staging and UUID/cleanup helpers; latest **5 + 5 passed**.
+- `tests.unit.test_rm_spike` and `tests.unit.test_model_runtime`: experimental
+  RPC/fixture/fencing, private Ollama endpoint, exact execution-entry notification,
+  dead-provider unload, saved process-group identity and adopted-grandchild reaping.
+  Together with `tests.unit.test_spike`, **22 passed** with
+  `.venv/bin/python -W error -m unittest -v tests.unit.test_rm_spike tests.unit.test_model_runtime tests.unit.test_spike`.
+  Tests own temporary stores and child/grandchild processes.
+- `tests.unit.test_artifact_volume` (**unit**, G4.3): source-independent selected
+  artifact identities, atomic selection/reuse, strict manifest/sets, source and
+  destination path safety, corruption and missing inputs, marked staging cleanup,
+  concurrent reuse and injected copy/rename failures preserving prior selection.
+  Tests own temporary source and output directories; no real model/GPU proof.
+- `tests.integration.test_provisioning_http` (**unit**, G4.3/G2.1): read-only
+  configured-volume verification, minimal identity summaries, expected-digest
+  mismatch, strict content type/JSON/body limits, concurrent overload, timeout
+  and disconnect slot retention, worker exception cleanup and actual OpenAPI
+  response validation. The tiny SPECS-backed artifact files, volumes, worker
+  barriers and loopback servers are test-owned. No semantic model validation,
+  real GPU capacity, production mount/image or readiness proof is claimed.
+  Focused command: `.venv/bin/python -m unittest -v tests.integration.test_provisioning_http tests.unit.test_artifact_volume tests.unit.test_openapi_validation`.
+- `tests.unit.test_profiles`: **19 passed** for durable profile replay/conflicts,
+  exact closest-context lookup, draft exclusion, throughput evidence consistency,
+  content/identity corruption, transaction rollback/reuse and strict schema
+  rejection. Temporary SQLite databases are test-owned. This validates supplied
+  measurement evidence, not actual GPU measurement or runtime integration.
+- `tests.unit.test_profile_contracts`: strict numeric and immutable provisioning
+  data, model-specific profile shape and invalid-context rejection. Shared
+  contracts still permit explicitly synthetic samples for experiments; only the
+  measured registry boundary enforces the production evidence requirements.
+
+- `tests.integration.test_resource_manager_http` (**unit**, local loopback):
+  G1.1/G1.2 scheduler-over-HTTP plain-byte dispatch and exact durable publication;
+  G2.1 replay, delayed progress, actual cursor expiry, per-frame/error bounds;
+  G2.2 request cancellation and idempotent stop; G4.1/G4.2/G4.3 server-owned
+  context and CoEdIT/GECToR bucket profiles, stale-before-reference-read fencing,
+  strict verified content references, typed p+p backpressure and same-key retry.
+  Watch flood/disconnect tests own their HTTP clients, servers and core tasks;
+  fixtures own temporary stores and publication receipts. All provider execution
+  and measurement evidence here is synthetic, not production or GPU proof.
+- `tests.unit.test_openapi_validation` (**unit**): parsed OpenAPI validation,
+  actual submission response schema resolution and preservation of future API
+  request/response/idempotency contracts. Existing text checks also remain.
+- `tests.unit.test_scheduler_operations` (**unit**, G1.1/G1.2/G2.2): durable
+  start/cancel/stop journal replay and conflicts, stale generation/session
+  rejection, lost start acknowledgment, concurrent same-key start and blocked
+  start versus stop fencing. Tests own temporary databases and coordinator tasks.
+- `tests.integration.test_scheduler_http` (**unit**, G1.1/G1.2/G2.1/G2.2): all six
+  loopback operations, exact local publication, malformed input without durable
+  insertion, immutable historical and live request replay across unrelated global
+  cursor gaps, bounded batches, terminal reconnect closure, preheader legacy
+  rejection, heartbeat/disconnect watcher cleanup and hostile client-wire parsing.
+  Clients/servers, temporary stores and fake providers are test-owned. No real
+  provider, deployed startup or production restart proof is claimed.
+- `tests.unit.test_scheduler.SchedulerIntegrationTests.test_same_database_publication_commits_receipt_and_done_together`,
+  `test_end_to_end_done_and_local_receipt`, and
+  `test_explicit_stop_publishing_terminalizes_and_cannot_publish` in the same class
+  (**unit**, G1.2/G2.2): shared-DB atomic receipt/done, separate-DB idempotent
+  receipt and stop-before-publication with no late receipt. Temporary databases
+  and result files are fixture-owned. This does not establish every process-crash
+  interleaving between separate receipt and queue databases.
+
+Scheduler-focused command: `.venv/bin/python -m unittest -v tests.integration.test_scheduler_http tests.unit.test_openapi_validation tests.unit.test_scheduler_operations tests.unit.test_scheduler tests.unit.test_queue_regressions tests.integration.test_resource_manager_http tests.unit.test_results`.
+
+Stable focused command: `.venv/bin/python -m unittest -v tests.integration.test_resource_manager_http tests.unit.test_openapi_validation tests.unit.test_contracts`.
+OpenAPI tests use the public `referencing` registry; full discovery now also
+passes with warnings treated as errors.
+
 Docker and NVIDIA GPU access were verified through the host daemon on 2026-09-16
 with a disposable network-disabled `nvidia-smi` container: RTX 4070 Ti, 12,282 MiB,
 driver 591.86, compute capability 8.9. See
 [environment evidence](../../../../docs/implementation-decisions.md#environment-reassessment-2026-09-16).
-This is not compatibility-spike or product proof. Artifact completeness,
-production runtime compatibility and three-model offline inference remain
-unverified; no runtime pins, measured GPU capacity or offline model execution
-are claimed.
+The subsequent candidate image `llm-compatibility-spike:candidate` passed small
+offline inference for SmolLM, CoEdIT and GECToR with selected hashes and local
+verb vocabulary, returning `passed-candidate`. This is a **non-qualifying GPU
+experiment**, not a full compatibility matrix or product proof. The tester
+removed its owned container. The prepared context is retained intentionally.
+See [candidate inputs and commands](../../../../docs/compatibility-spike.md).
+The expanded RM-mediated network-disabled candidate run also passed for all three
+models: small and configured upper fixtures, active cancellation result fencing,
+stale-token rejection and restored GPU-process baseline before the next load.
+Each emitted `ready`, `cancel_fenced`, and `cleanup_restored`; the tester removed
+`llm-compatibility-rm-spike-candidate` and verified absence. This is still a
+non-qualifying experiment with synthetic unmeasured p=1 profiles, not the complete
+compatibility exit or production E2E. At that earlier stage SmolLM lacked independent
+no-truncation proof; the later bounded ASCII proof is recorded below. Active
+interruption, production runtime pins and measured capacity remain
+unproved. Build-time apt required networking; runtime networking was disabled.
+
+Latest rebuilt candidate RM runs passed on 2026-09-16: normal lifecycle in **41s**
+and `--inject-process-failure` in **36s**. Each of SmolLM, CoEdIT and GECToR
+produced an exact-attempt failure with no result, typed stale-session rejection,
+and `group_gone=True nvml_baseline=True` after explicit RM stop. The tester
+verified both disposable containers absent. The injected boundary is entry into
+the execution adapter, not proof that a CUDA kernel started. Process-loss proof
+does not establish provider interruption, full-container restart, production
+health/readiness or a measured profile; all goal statuses remain partial.
+
+Additional latest evidence:
+
+- `tests.integration.test_profile_validation_http` (**unit**, G4.2/G4.3): exact
+  submitted measured profiles for all three models, server-owned identity snapshots,
+  draft/corrupt/mismatched evidence rejection, missing-database non-creation,
+  strict and chunked body bounds, recursive JSON, huge integer handling,
+  pre-worker slot release, timeout/overload and disconnected late-worker failure
+  cleanup. Profile-store read-only and actual OpenAPI response-schema tests provide
+  independent coverage. Tests own temporary registries, HTTP servers and worker
+  barriers; synthetic measurements do not prove GPU capacity or readiness.
+  Dedicated SQLite OperationalError injection remains a regression coverage gap.
+  Command: `.venv/bin/python -W error -m unittest -v tests.integration.test_profile_validation_http tests.integration.test_provisioning_http tests.unit.test_profiles tests.unit.test_openapi_validation`.
+- Compatibility focused suites now pass **36 tests**, including
+  `tests.unit.test_candidate_input_bounds`, exact raw prompt/finished-response
+  checks in `tests.unit.test_model_runtime`, and flat-image import packaging in
+  `tests.unit.test_compatibility_inputs`. Rebuilt normal and process-loss GPU
+  candidate scenarios passed again for all three models with networking disabled.
+  SmolLM has independent conservative no-truncation evidence for the configured
+  printable-ASCII bucket only; arbitrary UTF-8 and model maxima remain unproved.
+  Both owned containers were absent after verification. These remain experiments,
+  not production-boundary E2E or measured profiles.
 
 ## Required production-boundary evidence
+
+Real-adapter candidate check (2026-09-17, **blocked**, not qualifying E2E):
+`tools/compatibility/adapter_check.py` runs the actual SmolLM provider and Linux
+GPU proof with an explicitly unmeasured profile. Its separate hash-locked aiohttp
+layer built with Docker networking disabled. Runtime with `--network none`, one
+UUID-selected GPU and a read-only Docker-host `/proc` bind failed before readiness:
+the launcher reported `procfs_missing` while opening `/host/proc/self/stat`.
+No inference, supervisor residency or GPU cleanup-baseline proof was reached.
+The tester removed `llm-compatibility-adapter-check` and verified its absence.
+Further GPU testing stopped pending operator repair of authoritative host procfs
+availability and NVML PID-namespace alignment. See
+[command and limits](../../../../docs/adapter-gpu-check.md).
+
+`tests.unit.test_adapter_check` (**unit**, 9 tests) covers the actual in-process
+RM lifecycle with mocked provider/GPU/daemon seams, selected artifact identities,
+unmeasured profile labeling, local orphaned process-group cleanup, launcher
+failure categorization and cancellation cleanup. Tests own temporary artifacts
+and processes. These do not prove real Ollama execution or host/NVML alignment.
+
+Latest adapter/proof **unit** evidence (G4.1/G4.2/G4.3):
+
+- `tests.unit.test_smollm_provider`: test-owned loopback Ollama and tiny real GGUF
+  metadata validate framing, strict response bounds, local import failure paths,
+  readiness/cleanup and admission. Mandatory supervisor evidence rejects missing
+  or mismatched identity, empty/duplicate runner PIDs and supervisor aliases.
+  Failed readiness disables execution; never-loaded cleanup checks actual API
+  absence before RM recovery. These are synthetic residency/profile fixtures,
+  not real Ollama compatibility or measured GPU admission.
+- `tests.unit.test_gpu_proof`: synthetic procfs and injected NVML prove ancestry,
+  PID reuse/race rejection, exclusive baseline, MIG/API failures and explicit
+  real-capture host-namespace attestation. Actual deployment must make that
+  attestation truthful; these tests do not establish a host/container PID mapping.
+- `tests.unit.test_resource_manager`: failed initial readiness cleanup permits
+  a fresh start only after verification; timed-out unfinished load blocks cleanup
+  and leaves no exposed session. Tests release and await their lifecycle gates.
+- `tests.unit.test_smollm_provider.SmolLMProviderTests.test_real_cli_timeout_and_output_overflow_are_bounded`:
+  real test-owned CLI processes exercise timeout and output-overflow cleanup.
+  A temporary unraisable hook, forced GC and event-loop turns assert no leaked
+  subprocess transports. Three repeated runs passed without warnings after a
+  reproducible stderr transport leak was repaired.
+
+Focused command: `.venv/bin/python -W error -m unittest -v tests.unit.test_gpu_proof tests.unit.test_smollm_provider tests.unit.test_resource_manager tests.unit.test_compatibility_inputs tests.unit.test_candidate_input_bounds`.
+Tests own temporary artifacts, procfs fixtures, subprocesses, HTTP servers and
+event-loop resources. Candidate flat-image imports are independently covered by
+the prepare/refresh regression. No production-boundary E2E status changes.
 
 - **G1.1 — Durable asynchronous work (`e2e`):** Accepted work in the SQLite
   QueueStore survives real scheduler or consumer restart and reaches an

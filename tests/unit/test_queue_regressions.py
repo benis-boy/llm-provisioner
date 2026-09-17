@@ -1,4 +1,5 @@
 import os
+import json
 import subprocess
 import sys
 import tempfile
@@ -182,6 +183,19 @@ class QueueRegressionTests(unittest.TestCase):
             ).fetchone()[0], RequestStatus.ERROR.value)
             with self.assertRaises(SessionError):
                 old_store.get("r")
+            old_store.close()
+            new_store.close()
+
+    def test_different_model_supersession_records_old_owner_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "q.sqlite"
+            old_store, _ = self.make(path, "old", ModelId.SMOLLM)
+            old_store.enqueue("r", "p", idempotency_key="r")
+            new_store, _ = self.make(path, "new", ModelId.COEDIT)
+            event = json.loads(new_store.events(0)[-1]["data"])
+            self.assertEqual(event["snapshot"]["schedulerId"], "old")
+            self.assertEqual(event["snapshot"]["modelId"], ModelId.SMOLLM.value)
+            self.assertEqual(event["snapshot"]["status"], RequestStatus.ERROR.value)
             old_store.close()
             new_store.close()
 

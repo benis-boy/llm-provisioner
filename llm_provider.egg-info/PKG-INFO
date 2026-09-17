@@ -2,3 +2,7 @@ Metadata-Version: 2.4
 Name: llm-provider
 Version: 0.1.0
 Requires-Python: >=3.12
+Requires-Dist: aiohttp<4,>=3.13
+Provides-Extra: test
+Requires-Dist: openapi-spec-validator<0.8,>=0.7; extra == "test"
+Requires-Dist: PyYAML<7,>=6; extra == "test"

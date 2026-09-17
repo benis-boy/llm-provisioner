@@ -1,3 +1,6 @@
 /LLMs
 *.pyc
 .venv
+*.whl
+*.tgz
+.compatibility/context/models

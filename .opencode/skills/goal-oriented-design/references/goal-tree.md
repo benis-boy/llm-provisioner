@@ -52,17 +52,17 @@ while allowing dependent work to be submitted before it is ready.
 
 ### G4 — GPU model service is safe and capacity-aware
 
-**target —** The available GPU remains productively supplied while model
+**partial —** The available GPU remains productively supplied while model
 residency, concurrency, and buffering stay within proved operational limits.
 
-- **target — G4.1 — Safe exclusive model service:** The GPU serves SmolLM via
+- **partial — G4.1 — Safe exclusive model service:** The GPU serves SmolLM via
   Ollama, CoEdIT via Transformers/PyTorch, or GECToR via gector under one fenced
   residency authority, without stale execution crossing a model switch.
-- **target — G4.2 — Bounded useful admission:** Each resident model accepts no
+- **partial — G4.2 — Bounded useful admission:** Each resident model accepts no
   more than its measured throughput-optimal parallelism plus a bounded input
   buffer; competing schedulers are rejected so the one GPU maximizes throughput
   for its active model.
-- **target — G4.3 — Offline reproducible readiness:** Operators can provision
+- **partial — G4.3 — Offline reproducible readiness:** Operators can provision
   useful parent-folder artifacts into the runtime, bootstrap ResourceManager,
   and reproduce a model/GPU/context throughput profile without runtime internet
   access; incompatible or unproved profiles fail closed.
@@ -70,8 +70,32 @@ residency, concurrency, and buffering stay within proved operational limits.
 Detailed target contracts and sequencing:
 [`docs/queue-scheduler-resource-manager-plan.md`](../../../../docs/queue-scheduler-resource-manager-plan.md).
 
-Implementation boundary: G1–G3 currently have synchronous SQLite/result primitives,
-durable optional-function descriptors with fail-closed claims, and unit/local
-integration evidence only. Function evaluation, async scheduling, provider/server
-boundaries and qualifying E2E remain absent. G4 has contract definitions, not
-implemented GPU service, and remains target.
+Implementation boundary: G1–G3 have SQLite/result primitives, durable optional
+functions, bounded eligibility evaluation, and an async scheduler with local
+integration evidence. G4 has a transport-neutral ResourceManager, artifact
+verification, atomic content-addressed artifact-volume provisioning and candidate
+offline tooling. Three-model RM-mediated fixture/cancellation/cleanup and injected
+child-process-loss experiments passed, including owned-group disappearance and
+NVML baseline restoration. These are candidate experiments, not production proof.
+Durable profile storage validates supplied measurement evidence and exact identity;
+it does not perform benchmarking. The RM HTTP/JSON/SSE server/client now has
+loopback evidence, including scheduler publication, server-owned measured-profile
+lookup, bounded admission and resumable progress. Scheduler HTTP now has local
+loopback evidence for durable keyed lifecycle operations, strict JSON, immutable
+bounded request replay and fenced publication with shared or separate receipt
+databases. Read-only artifact verification HTTP has local tests for selected-file
+identity, strict bounded requests and hash-worker lifetime across timeout/disconnect.
+It does not assert runtime readiness. Read-only profile-validation HTTP now checks
+full submitted profiles against server-owned current identities and exact measured
+registry records with bounded worker lifetimes. Candidate GPU scenarios passed
+again with independent bounded ASCII input evidence and exact raw SmolLM framing.
+An installable SmolLM adapter now uses bounded local Ollama import, exact raw
+framing, typed supervisor/runner residency evidence and cleanup checks. Linux
+NVML/procfs proof and initial RM failure cleanup have local regression coverage;
+real host-PID namespace wiring and real-adapter GPU execution remain unproved.
+A network-disabled actual-SmolLM-adapter candidate check now exists, but its
+real run failed closed with `procfs_missing` at `/host/proc/self/stat`; operator
+repair of authoritative host procfs availability is required before further GPU
+verification. Local harness tests do not establish that namespace boundary.
+Capacity-measurement and health HTTP bindings, complete production adapters/image, actual measured capacity profiles and
+qualifying production-boundary E2E remain absent. All leaves remain partial.

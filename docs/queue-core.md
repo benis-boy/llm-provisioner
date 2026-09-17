@@ -1,4 +1,4 @@
-# Durable queue core: implemented slice
+# Durable queue core: implemented slice F
 
 This synchronous Python 3.12 storage foundation is **not yet an inference
 service**. Run from the repository root; no third-party packages are needed for
@@ -10,6 +10,8 @@ the core or its current tests.
   Strict canonical function-descriptor encoding/decoding validates durable intent.
 - `services/llm/queue/store.py`: authoritative SQLite schema and transactional
   request, position, attempt, lease, outbox, event and local session primitives.
+- `services/llm/queue/eligibility.py`: bounded async FIFO eligibility evaluation
+  and guarded evaluated claims.
 - `services/llm/queue/results.py`: content-addressed bytes and local publisher
   receipts. Files are fsynced before handoff state is committed.
 - `services/llm/queue/transition_table.md`: adjacency versus operation guards.
@@ -85,10 +87,18 @@ Absent descriptors retain the original fingerprint format and enqueue replay.
 Recovery retains descriptor intent. Cancellation, stop and session fencing still
 apply to descriptor-bearing work.
 
-This is persistence and safe blocking only: even a registered, always-true ready
-function cannot currently enable a claim. Function execution, missing-name
-`function_unavailable` classification, result resolution, template validation,
-polling and eligibility invalidation belong to the future async scheduler.
+Slice F evaluates bounded FIFO slices outside transactions. Dependency IDs resolve
+only to acknowledged durable handoff references. Sync functions run in
+`asyncio.to_thread`; async results are awaited. Readiness requires strict `bool`,
+and templates require a nonempty reference accepted by the injected validator.
+Failures are request-local. Retry-delayed rows are not eligible and do not run
+functions. An opaque, single-use version/session/fingerprint capability is
+rechecked with ordinary retry, dependency and accepting fences before durable
+claim; durable version changes delete unconsumed capabilities. Evaluated template
+payload references are retained on the attempt and submit outbox record for
+recovery/replay. Mutations and explicit/poll invalidation restart scanning at the
+front using monotonic invalidation epochs. This is not a full scheduler or
+ResourceManager.
 
 ## Verification and remaining work
 

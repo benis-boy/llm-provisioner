@@ -39,6 +39,7 @@ Operating rules:
 - Set explicit shell timeouts for delegated commands likely to exceed 120 seconds, using prior timing evidence and reasonable margin.
 - If only the shell timeout was inadequate, retry once with a sufficient timeout after confirming the command is no longer running and partial output is safe to replace.
 - Testers never own environment investigation or repair. If either tester reports an environment block, assess its existing evidence, normally abort further testing, and notify the user that they must repair the environment. Do not send the tester back to troubleshoot it.
+- LLM Models are gitignored.
 
 Routing guide:
 

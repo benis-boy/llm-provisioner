@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import math
+from types import MappingProxyType
 from typing import Mapping
 
 from services.llm.queue.contracts import ModelId, _text
@@ -22,15 +23,19 @@ class GenerationConfig:
         _text(self.dtype, "dtype")
         if self.dtype not in {"float16", "bfloat16", "float32"}:
             raise ValueError("unsupported dtype")
-        if not self.parameters:
+        if not isinstance(self.parameters, Mapping):
+            raise ValueError("generation parameters must be a mapping")
+        snapshot = dict(self.parameters)
+        if not snapshot:
             raise ValueError("generation parameters are required")
-        for key, value in self.parameters.items():
+        for key, value in snapshot.items():
             if not isinstance(key, str) or not key:
                 raise ValueError("generation parameter names must be text")
             if not isinstance(value, (int, float, bool, str)):
                 raise ValueError("generation parameters must be scalar")
             if isinstance(value, float) and not math.isfinite(value):
                 raise ValueError("generation parameters must be finite")
+        object.__setattr__(self, "parameters", MappingProxyType(snapshot))
 
 
 @dataclass(frozen=True)
@@ -42,13 +47,22 @@ class CapacityBucket:
     max_iterations: int | None = None
     thresholds: tuple[float, ...] = ()
     def __post_init__(self) -> None:
+        integer_fields = (self.max_input_tokens, self.max_output_tokens, self.max_iterations)
+        if any(item is not None and (not isinstance(item, int) or isinstance(item, bool))
+               for item in integer_fields):
+            raise ValueError("token and iteration limits must be integers")
         if self.max_input_tokens < 1 or self.max_output_tokens < 1:
             raise ValueError("token limits must be positive")
-        if not self.native_batch_shape or any(item < 1 for item in self.native_batch_shape):
+        if not isinstance(self.native_batch_shape, tuple) or any(
+                not isinstance(item, int) or isinstance(item, bool) or item < 1
+                for item in self.native_batch_shape):
             raise ValueError("native batch shape must be positive")
         if self.max_iterations is not None and self.max_iterations < 1:
             raise ValueError("iteration limit must be positive")
-        if any(item < 0 or item > 1 for item in self.thresholds):
+        if not isinstance(self.thresholds, tuple) or any(
+                not isinstance(item, (int, float)) or isinstance(item, bool)
+                or not math.isfinite(item) or item < 0 or item > 1
+                for item in self.thresholds):
             raise ValueError("thresholds must be between zero and one")
 
 
@@ -69,7 +83,9 @@ class ModelConfig:
         if self.resource_manager_type != RESOURCE_MANAGER_TYPES[model]:
             raise ValueError("resource manager type does not match model")
         if model is ModelId.SMOLLM:
-            if not self.context_size_estimates or any(item < 1 for item in self.context_size_estimates):
+            if (not isinstance(self.context_size_estimates, tuple) or not self.context_size_estimates
+                    or any(not isinstance(item, int) or isinstance(item, bool) or item < 1
+                           for item in self.context_size_estimates)):
                 raise ValueError("SmolLM needs positive context estimates")
             if self.buckets:
                 raise ValueError("SmolLM uses context estimates, not buckets")
@@ -84,7 +100,11 @@ class ModelConfig:
             if model is ModelId.COEDIT:
                 if any(item.max_iterations is not None or item.thresholds for item in self.buckets):
                     raise ValueError("CoEdIT buckets do not accept GECToR iteration or threshold fields")
-        if any(not isinstance(item, str) or not item for item in self.benchmark_requests):
+        if not isinstance(self.context_size_estimates, tuple) or any(
+                not isinstance(item, int) or isinstance(item, bool) or item < 1
+                for item in self.context_size_estimates):
+            raise ValueError("context estimates must be a tuple of positive integers")
+        if not isinstance(self.benchmark_requests, tuple) or any(not isinstance(item, str) or not item for item in self.benchmark_requests):
             raise ValueError("benchmark requests must be non-empty strings")
         if not isinstance(self.buckets, tuple) or any(not isinstance(item, CapacityBucket) for item in self.buckets):
             raise ValueError("buckets must be typed capacity buckets")

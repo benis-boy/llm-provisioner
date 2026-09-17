@@ -45,4 +45,22 @@ persistence is not execution. Skip-line groups
 extend at the group tail before their scheduled anchor; with no scheduled
 anchor, insertion falls back to append. Rank, insertion sequence, anchor, and
 group sequence are distinct durable fields. Optional functions poll every one
-second by default, configurable.
+ second by default, configurable.
+
+## Slice F evaluation boundary
+
+`EligibilityEvaluator.next_eligible()` reads bounded candidate slices and skips
+blocked nodes without fetching the full queue. Awaited callbacks execute outside
+SQLite transactions. An opaque capability contains queue version, session,
+generation, fingerprint, and evaluated payload reference; only
+`QueueStore.claim_evaluated()` can consume it. Claim creates the attempt and
+submit outbox atomically. Watchdog and ResourceManager admission remain future
+scheduler work.
+
+Evaluation does not make retry-delayed work eligible or arm scheduler watchdog
+work. Both success and callback errors are discarded if the durable version,
+session/generation, cancellation/stop state, or replacement session changed
+since the evaluation snapshot. Evaluated capabilities are single-use internal
+claims rather than a public direct-claim convenience; a durable version change
+removes all unconsumed capabilities. Template payload references are persisted
+with the created attempt and submit outbox record.

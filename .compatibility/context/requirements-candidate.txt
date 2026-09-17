@@ -1,0 +1,10 @@
+# Candidate hypothesis only; prepare.py resolves this exact CPython 3.12 linux/amd64 wheel set.
+torch==2.7.1+cu128
+transformers==4.49.0
+tokenizers==0.21.0
+safetensors==0.5.3
+accelerate==1.3.0
+huggingface-hub==0.28.1
+python-Levenshtein==0.26.1
+nvidia-ml-py==12.570.86
+gector==1.2.0

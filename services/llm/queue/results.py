@@ -81,24 +81,34 @@ class LocalPublisher:
         self.result_store.verify(result_reference)
         self.db.execute("BEGIN IMMEDIATE")
         try:
-            receipt = self.db.execute(
-                "SELECT result_reference FROM publication_receipts WHERE idempotency_key=?",
-                (idempotency_key,),
-            ).fetchone()
-            if receipt:
-                if receipt[0] != result_reference:
-                    raise ResultError("publication key conflict")
-                self.db.execute("COMMIT")
-                return False
-            self.db.execute(
-                "INSERT INTO publication_receipts VALUES(?,?)",
-                (idempotency_key, result_reference),
-            )
+            created = self.publish_on_connection(self.db, result_reference, idempotency_key)
             self.db.execute("COMMIT")
-            return True
+            return created
         except Exception:
             self.db.execute("ROLLBACK")
             raise
+
+    def publish_on_connection(self, connection: sqlite3.Connection,
+                              result_reference: str, idempotency_key: str) -> bool:
+        """Insert a receipt in a caller-owned transaction without committing it."""
+        if not isinstance(connection, sqlite3.Connection):
+            raise TypeError("connection must be a SQLite connection")
+        self.result_store.verify(result_reference)
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS publication_receipts "
+            "(idempotency_key TEXT PRIMARY KEY, result_reference TEXT NOT NULL)"
+        )
+        receipt = connection.execute(
+            "SELECT result_reference FROM publication_receipts WHERE idempotency_key=?",
+            (idempotency_key,),
+        ).fetchone()
+        if receipt:
+            if receipt[0] != result_reference:
+                raise ResultError("publication key conflict")
+            return False
+        connection.execute("INSERT INTO publication_receipts VALUES(?,?)",
+                           (idempotency_key, result_reference))
+        return True
 
     def close(self) -> None:
         self.db.close()
