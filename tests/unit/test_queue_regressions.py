@@ -125,6 +125,23 @@ class QueueRegressionTests(unittest.TestCase):
             self.assertEqual([entry["kind"] for entry in store.outbox()], ["submit", "handoff"])
             store.close()
 
+    def test_operation_guards_reject_wrong_attempt_and_immutable_terminal_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, session = self.make(Path(directory) / "q.sqlite")
+            store.enqueue("r", "payload", idempotency_key="r")
+            token = store.claim("r", session.token, session.generation)
+            with self.assertRaises(StaleCallback):
+                store.mark_on_gpu("r", token, session.token, session.generation + 1)
+            store.finish_attempt("r", token, session.token, session.generation)
+            store.stage_handoff("r", token, session.token, session.generation, "0" * 64, "handoff")
+            store.acknowledge_handoff("r", "handoff")
+            with self.assertRaises(StaleCallback):
+                store.retry("r", token, session.token, session.generation)
+            self.assertEqual(store.cancel("r", idempotency_key="cancel-terminal")["status"],
+                             RequestStatus.DONE.value)
+            self.assertEqual(store.get("r")["status"], RequestStatus.DONE.value)
+            store.close()
+
     def test_non_retryable_failure_stops_the_entire_queue(self):
         with tempfile.TemporaryDirectory() as directory:
             store, session = self.make(Path(directory) / "q.sqlite")

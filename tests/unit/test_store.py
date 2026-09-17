@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -57,6 +58,45 @@ class StoreTests(unittest.TestCase):
         # A new cyclic edge cannot be introduced because dependencies are immutable.
         with self.assertRaises(DependencyError):
             self.store.enqueue("a2", "p", dependencies=("b", "a2"), idempotency_key="a2")
+
+    def test_corrupt_multi_node_cycle_is_rejected_by_graph_validation(self):
+        # Public enqueue IDs are immutable and therefore cannot manufacture a
+        # cycle.  This fixture represents a damaged/restored queue and checks
+        # that the defensive validator still walks the complete graph.
+        self.store.enqueue("a", "p", idempotency_key="a")
+        self.store.enqueue("b", "p", idempotency_key="b")
+        self.store.db.execute("UPDATE requests SET dependencies=? WHERE request_id='a'", ('["b"]',))
+        self.store.db.execute("UPDATE requests SET dependencies=? WHERE request_id='b'", ('["a"]',))
+        with self.assertRaises(DependencyError):
+            self.store.enqueue("c", "p", dependencies=("a",), idempotency_key="c")
+
+    def test_corrupt_missing_dependency_fails_structured_instead_of_crashing(self):
+        self.store.enqueue("r", "p", idempotency_key="r")
+        self.store.db.execute("UPDATE requests SET dependencies=? WHERE request_id='r'", ('["gone"]',))
+        from services.llm.queue.eligibility import EligibilityEvaluator
+        result = asyncio.run(EligibilityEvaluator(self.store).evaluate("r"))
+        self.assertEqual(result.error_code, "dependency_failed")
+        self.assertEqual(self.store.get("r")["error_code"], "dependency_failed")
+
+    def test_corrupt_missing_dependency_fails_both_claim_paths_without_attempt_or_outbox(self):
+        self.store.enqueue("direct", "p", idempotency_key="direct")
+        self.store.db.execute("UPDATE requests SET dependencies=? WHERE request_id='direct'", ('["gone"]',))
+        self.assertIsNone(self.store.claim("direct", self.session.token, self.session.generation))
+
+        self.store.enqueue("evaluated", "p", idempotency_key="evaluated")
+        self.store.db.execute("UPDATE requests SET dependencies=? WHERE request_id='evaluated'", ('["gone"]',))
+        capability = self.store.record_evaluation("evaluated", self.store._version(), "evaluated-payload")
+        self.assertIsNone(self.store.claim_evaluated(capability))
+
+        for request_id in ("direct", "evaluated"):
+            self.assertEqual(self.store.get(request_id)["status"], RequestStatus.ERROR.value)
+            self.assertEqual(self.store.get(request_id)["error_code"], "dependency_failed")
+            self.assertEqual(self.store.db.execute(
+                "SELECT COUNT(*) FROM attempts WHERE request_id=?", (request_id,)
+            ).fetchone()[0], 0)
+            self.assertEqual(self.store.db.execute(
+                "SELECT COUNT(*) FROM outbox WHERE request_id=?", (request_id,)
+            ).fetchone()[0], 0)
 
     def test_handoff_ack_is_the_only_done_path_and_deactivates_attempt(self):
         token = self.claim()

@@ -27,14 +27,16 @@ capacity notes are not implementation evidence.
 
 ### Current/open status and evidence ledger (2026-09-17)
 
-Work is tracked in logical slices, not whole-phase completion claims. See
+Phase 2 is complete against its implementation and local acceptance exit;
+other phases remain open. Phase completion does not promote a product goal to
+`done` without its required production-boundary proof. See
 [implementation decisions](implementation-decisions.md) and
 [queue-core boundaries](queue-core.md).
 
 The bounded implementation and local-verification record is maintained in the
 [partial-completed evidence ledger](queue-scheduler-resource-manager-plan-partial_completed.md).
-It contains no completed phases or goals: G0 and G1–G4 remain `partial`, and
-no qualifying production-boundary E2E exists.
+It records the Phase 2 completion and other bounded slices: G0 and G1–G4 remain
+`partial`, and no qualifying production-boundary E2E exists.
 
 - [ ] **Phase 0 exit:** fully validate OpenAPI and client/server bindings; finish
   profile runtime integration after compatibility review. Durable profile SQLite
@@ -48,9 +50,9 @@ no qualifying production-boundary E2E exists.
   artifacts. Full compatibility exit and production runtime
   remain unproved; candidate pins are not approved production pins. See
   [environment evidence](implementation-decisions.md#environment-reassessment-2026-09-16).
-- [ ] **Phase 2 exit:** integrate real ResourceManager session reconciliation
-  and outbox delivery; finish operation-replay and guarded-transition behavioral
-  coverage.
+- [x] **Phase 2 — Durable queue core:** persistence, ordering, recovery,
+  RM HTTP session replacement/outbox replay and guarded operations verified.
+  [Acceptance evidence](queue-scheduler-resource-manager-plan-partial_completed.md#phase-2-complete--durable-queue-core).
 - [ ] **Phase 3 — Async QueueScheduler:** coordinator, dispatch replay, watch,
   completion watchdog, cancellation and crash publication recovery implemented
   locally. Review-driven race fixes passed local verification; production-boundary
@@ -760,12 +762,14 @@ proof. Use the target GPU, host driver, and NVIDIA Container Toolkit.
 - Exit: all three adapters load and run small/max requests sequentially offline
   through the ResourceManager skeleton on the target GPU.
 
-### Phase 2 — Durable queue core
+### Phase 2 — Durable queue core — complete
 
-- Implement request/attempt/result persistence, append and skip-line
-  transactions, dependency validation, leases, idempotency, and recovery.
-- Exit: crash/restart, duplicate enqueue/delivery, cycle, blocked-head, and
-  result-handoff retry tests pass.
+Persistence, append/skip-line ordering, dependencies, leases, idempotency,
+crash/restart and handoff retry satisfy the phase exit, including actual RM
+HTTP reconciliation and operation guards. **130 focused tests pass**; the
+eight-test acceptance suite also passed three repeated runs. Requirements,
+coverage and remaining production-proof limits are consolidated in the
+[completion record](queue-scheduler-resource-manager-plan-partial_completed.md#phase-2-complete--durable-queue-core).
 
 ### Phase 3 — QueueScheduler behavior
 

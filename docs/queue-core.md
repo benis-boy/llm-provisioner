@@ -1,8 +1,9 @@
-# Durable queue core: implemented slice F
+# Durable queue core: Phase 2 complete
 
 This synchronous Python 3.12 storage foundation is **not yet an inference
-service**. Run from the repository root; no third-party packages are needed for
-the core or its current tests.
+service**. Run from the repository root using the project virtual environment;
+the storage core is standard-library-only, while HTTP acceptance tests use the
+project's installed dependencies.
 
 ## Boundaries
 
@@ -15,13 +16,13 @@ the core or its current tests.
 - `services/llm/queue/results.py`: content-addressed bytes and local publisher
   receipts. Files are fsynced before handoff state is committed.
 - `services/llm/queue/transition_table.md`: adjacency versus operation guards.
-- `docs/openapi.yaml`: proposed external HTTP/SSE contract, not an implemented
-  endpoint or generated binding. Parser/schema validation remains outstanding.
+- `docs/openapi.yaml`: validated external HTTP/SSE contract. RM and scheduler
+  bindings have local loopback coverage; future operations remain target contracts.
 
 The local store session is a persistence fence, **not** a ResourceManager
-session or evidence of GPU ownership. A future coordinator must establish the
-replacement ResourceManager session before relying on recovery's assumption
-that prior provider execution is fenced.
+session or evidence of GPU ownership. `QueueScheduler` establishes the replacement
+ResourceManager session before dispatching recovered work; a new local fence alone
+does not prove that prior provider execution is fenced remotely.
 
 ## Publication contract
 
@@ -47,22 +48,25 @@ example and receipt replay across restart.
   replacement session. Previous execution is fenced and rescheduled in place;
   pending durable publication is retained without rerunning the provider.
 - Old submit records remain historical evidence, marked undeliverable. Cancel
-  records request best-effort cleanup; actual HTTP delivery is not implemented.
+  records request best-effort cleanup; the scheduler delivers them through its RM
+  client, including the tested HTTP binding.
 - Starting a different identity supersedes old nonterminal work in this database.
-  Cross-database/process coordination needs the future ResourceManager.
+  Cross-database/process execution is fenced by ResourceManager session replacement.
 - `claim` gates dependencies and retry eligibility but does not select the next
   request. Any non-null `ready` or `template` descriptor additionally blocks a
-  claim without creating an attempt, submit record or claim event. The future
-  bounded scheduler must choose eligible FIFO and evaluate readiness/templates;
+  claim without creating an attempt, submit record or claim event. The bounded
+  scheduler chooses eligible FIFO and evaluates readiness/templates;
   arbitrary direct claims are not a FIFO scheduler. Other ungated requests can
   still be claimed; no optional functions execute inside SQLite transactions.
 - Missing/self/cyclic dependencies are rejected before enqueue acknowledgement
-  with `DependencyError`. Failed dependencies become `dependency_failed` when
-  evaluated. Recursive propagation requires scheduler scans.
+  with `DependencyError`. Failed dependencies, including missing nodes in damaged
+  stored graphs, become `dependency_failed` when evaluated or claimed. Recursive
+  propagation requires scheduler scans.
 - Grouped skip-line insertions are serialized by SQLite. Concurrent order follows
   durable insertion sequence, not thread start order.
 - Lease expiration is reconciled explicitly; no background loop runs inside the
-  store. Events have increasing cursors, but no resumable SSE transport exists.
+  store. Events have increasing cursors; the scheduler HTTP binding supplies
+  resumable SSE replay.
 - Stop/cancel fence pending deliveries transactionally. An external delivery
   loop must coordinate publication and cancellation; a caller must not publish
   a previously fetched outbox record without reconciling current ownership.
@@ -72,7 +76,7 @@ example and receipt replay across restart.
 `enqueue(..., ready=FunctionDescriptor(...), template=FunctionDescriptor(...))`
 accepts keyword-only descriptors. Each contains a registered name, finite JSON
 arguments and dependency result IDs. Those IDs must be among the request's
-declared same-scheduler dependency request IDs; future execution resolves them to
+declared same-scheduler dependency request IDs; evaluation resolves them to
 acknowledged durable result references. Function implementations are never stored.
 
 Arguments are revalidated and serialized at enqueue, so later caller mutations
@@ -103,14 +107,15 @@ ResourceManager.
 ## Verification and remaining work
 
 ```sh
-python3 -m unittest discover -s tests -p 'test_*.py'
-python3 -m compileall -q services tests
+.venv/bin/python -W error -m unittest -v tests.integration.test_phase2_acceptance tests.unit.test_contracts tests.unit.test_store tests.unit.test_queue_regressions tests.unit.test_results tests.unit.test_scheduler_operations tests.unit.test_scheduler tests.unit.test_eligibility tests.unit.test_function_intent tests.integration.test_queue_recovery tests.integration.test_resource_manager_http
 ```
 
-The 47 current tests use temporary SQLite databases, independent connections,
-an abruptly exiting subprocess, and local result publication. Test-owned temporary
-directories clean up prerequisites. They do not establish all operation replay
-cases, every guarded lifecycle transition, or a production provider boundary.
-Optional-function execution, async outbox delivery, scheduler
-watchdog, ResourceManager admission/residency, adapters, profile persistence,
-provisioning and deployment remain unfinished. All production proof remains open.
+These **130 task-related tests** pass, including actual RM HTTP retained across
+scheduler process death and receipt-before-queue-ack replay. The eight-test Phase 2
+acceptance module also passed three repeated runs. Fixtures own temporary state,
+subprocesses and loopback services. The [completion record](queue-scheduler-resource-manager-plan-partial_completed.md#phase-2-complete--durable-queue-core)
+maps the phase exit and limits. The store's acknowledgment method remains a trusted
+publisher boundary; real publication verifies bytes before invoking it. Storage
+guard tests may supply synthetic digests and are not proof of result availability.
+Complete Phase 3 scheduler interaction coverage and production provider/deployment
+proof remain open; no product goal is promoted by this local phase exit.

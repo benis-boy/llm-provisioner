@@ -8,7 +8,57 @@ candidate offline tooling exist. Real production provider/server boundaries,
 measured profiles and production packaging remain incomplete.
 No qualifying production-boundary E2E proof exists and no leaf is done.
 
-## Local regression inventory (2026-09-17)
+## Phase 2 durable queue core completion (2026-09-17)
+
+**Unit/local integration**, supporting G1.1/G1.2/G2.1/G2.2/G3.1/G3.2 under G0:
+accepted queued work survives scheduler crashes, publication stays acknowledged
+and fenced, cancellation cannot revive work, and eligible ordering remains
+deterministic. Phase 2's implementation/local exit is complete; all goal leaves
+remain **partial** with production-boundary proof outstanding.
+
+- `tests.integration.test_phase2_acceptance.Phase2HTTPRecoveryTests.test_process_death_after_http_acceptance_reconciles_new_attempt`:
+  scheduler child killed after real RM HTTP accepts submission but before ack or
+  provider completion, retained server, new session/attempt after reopen, exact
+  `scheduler_superseded` stale-control failures and settled old submit.
+- `tests.integration.test_phase2_acceptance.Phase2HTTPRecoveryTests.test_receipt_before_queue_ack_replays_without_provider_execution`:
+  first receipt committed in an abruptly exiting child from durable handoff
+  identity; actual scheduler/RM HTTP recovery reaches done without executing the
+  provider again or creating another receipt.
+- `tests.integration.test_phase2_acceptance.Phase2OperationGuardMatrixTests`:
+  stale attempt/session/generation and owner fences, dispatch metadata replay and
+  conflicts, cancelled-submit acknowledgment, pending handoff recovery, and
+  terminal/idempotency guards. `tests.unit.test_contracts`, `test_store`,
+  `test_queue_regressions`, `test_scheduler_operations`, `test_results`,
+  `test_eligibility`, and `test_function_intent` independently cover adjacency,
+  leases/retry, publication verification, concurrent skip-line and blocked FIFO.
+- `tests.unit.test_scheduler.SchedulerIntegrationTests.test_lost_submit_ack_replays_same_attempt_key`,
+  `test_reopen_pending_handoff_does_not_execute_provider`,
+  `test_result_and_handoff_transient_failures_publish_once`, and
+  `test_same_database_publication_commits_receipt_and_done_together` independently
+  cover same-session replay and result publication using the real in-process RM.
+- `tests.unit.test_store.StoreTests` covers defensive multi-node cycle detection
+  and missing dependency errors through evaluator/direct/evaluated claims without
+  creating attempts or submits.
+
+Fixtures own temporary SQLite/results/receipt/profile state, child processes and
+loopback HTTP resources, including failure cleanup. Provider and measurement
+fixtures are synthetic: this does **not** prove RM-process persistence, GPU
+execution, deployment restart or the complete Phase 3 scheduler interaction matrix.
+
+Focused command (no full discovery):
+
+```sh
+.venv/bin/python -W error -m unittest -v tests.integration.test_phase2_acceptance tests.unit.test_contracts tests.unit.test_store tests.unit.test_queue_regressions tests.unit.test_results tests.unit.test_scheduler_operations tests.unit.test_scheduler tests.unit.test_eligibility tests.unit.test_function_intent tests.integration.test_queue_recovery tests.integration.test_resource_manager_http
+```
+
+**130 passed in 5.834s**. Additional command
+`.venv/bin/python -W error -m unittest -v tests.integration.test_phase2_acceptance`
+passed all **8 tests** three times (0.437s, 0.449s, 0.447s). Targeted compilation
+and whitespace checks passed. Independent final review found no remaining local
+Phase 2 defect. These results supersede the historical queue-core claims of no
+actual RM reconciliation; they do not supersede the production-proof gaps.
+
+## Historical local regression inventory (2026-09-17)
 
 Latest verification: `.venv/bin/python -W error -m unittest discover -s tests -p 'test_*.py'` —
 **294 passed** in 31.593 seconds. Adapter-harness verification passed **9 tests**.

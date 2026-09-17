@@ -38,10 +38,10 @@ whole scheduler. GPU timing may be incomplete and never blocks publication.
 
 Dispatch is eligible FIFO. Dependency completion, registered function
 availability, readiness, and template validity are gates. In the current
-boundary, any request carrying a durable `ready` or `template` descriptor is
-fail-closed at claim: it remains scheduled and emits no attempt, submit, or
-claim event. A future scheduler-owned evaluator may open that gate; descriptor
-persistence is not execution. Skip-line groups
+boundary, a request carrying a durable `ready` or `template` descriptor is
+fail-closed at direct `claim`: it remains scheduled and emits no attempt, submit,
+or claim event. The scheduler-owned evaluator opens that gate only through a
+guarded `claim_evaluated` capability; descriptor persistence is not execution. Skip-line groups
 extend at the group tail before their scheduled anchor; with no scheduled
 anchor, insertion falls back to append. Rank, insertion sequence, anchor, and
 group sequence are distinct durable fields. Optional functions poll every one
@@ -54,8 +54,8 @@ blocked nodes without fetching the full queue. Awaited callbacks execute outside
 SQLite transactions. An opaque capability contains queue version, session,
 generation, fingerprint, and evaluated payload reference; only
 `QueueStore.claim_evaluated()` can consume it. Claim creates the attempt and
-submit outbox atomically. Watchdog and ResourceManager admission remain future
-scheduler work.
+submit outbox atomically. The separate QueueScheduler owns watchdog and
+ResourceManager admission; these are not store/evaluator responsibilities.
 
 Evaluation does not make retry-delayed work eligible or arm scheduler watchdog
 work. Both success and callback errors are discarded if the durable version,

@@ -750,7 +750,36 @@ class QueueStore:
         row = self.db.execute("SELECT dependencies FROM requests WHERE request_id=? AND scheduler_id=?", (request_id, self.scheduler_id)).fetchone()
         if not row:
             return False
-        return any(self.db.execute("SELECT status FROM requests WHERE request_id=?", (item,)).fetchone()[0] in ("error", "cancelled") for item in json.loads(row[0]))
+        # Enqueue rejects missing dependencies, but a damaged/restored database
+        # must fail closed rather than turning a blocked request into an
+        # evaluator task exception.  Missing graph nodes have the same public
+        # outcome as a failed dependency: the request cannot ever become
+        # eligible and must receive a durable structured error.
+        for item in json.loads(row[0]):
+            dependency = self.db.execute(
+                "SELECT status FROM requests WHERE scheduler_id=? AND request_id=?",
+                (self.scheduler_id, item),
+            ).fetchone()
+            if dependency is None or dependency[0] in ("error", "cancelled"):
+                return True
+        return False
+
+    def _dependency_statuses(self, dependencies: list[str]) -> list[str | None]:
+        """Read dependency state in this scheduler's graph.
+
+        Corrupt/restored queues can contain a dependency whose request row is
+        gone.  Callers treat that unresolvable dependency as failed rather than
+        dereferencing a missing SQLite row or creating an attempt that can
+        never become eligible.
+        """
+        return [
+            dependency[0] if dependency is not None else None
+            for item in dependencies
+            for dependency in (self.db.execute(
+                "SELECT status FROM requests WHERE scheduler_id=? AND request_id=?",
+                (self.scheduler_id, item),
+            ).fetchone(),)
+        ]
 
     def claim_evaluated(self, capability: EvaluatedClaim, now: float | None = None,
                         lease_seconds: float = 30) -> str | None:
@@ -779,8 +808,8 @@ class QueueStore:
                 self._cancel_request_rows(capability.request_id, "error", "retry_exhausted")
                 self.db.execute("COMMIT"); return None
             dependencies = json.loads(row["dependencies"])
-            statuses = [self.db.execute("SELECT status FROM requests WHERE request_id=?", (d,)).fetchone()[0] for d in dependencies]
-            if any(s in ("error", "cancelled") for s in statuses):
+            statuses = self._dependency_statuses(dependencies)
+            if any(s is None or s in ("error", "cancelled") for s in statuses):
                 self._cancel_request_rows(capability.request_id, "error", "dependency_failed")
                 self.db.execute("COMMIT"); return None
             if any(s != "done" for s in statuses):
@@ -863,11 +892,8 @@ class QueueStore:
                 self.db.execute("COMMIT")
                 return None
             dependencies = json.loads(row["dependencies"])
-            dependency_statuses = [self.db.execute(
-                "SELECT status FROM requests WHERE scheduler_id=? AND request_id=?",
-                (self.scheduler_id, dep),
-            ).fetchone()[0] for dep in dependencies]
-            if any(status in (RequestStatus.ERROR.value, RequestStatus.CANCELLED.value)
+            dependency_statuses = self._dependency_statuses(dependencies)
+            if any(status is None or status in (RequestStatus.ERROR.value, RequestStatus.CANCELLED.value)
                    for status in dependency_statuses):
                 self._cancel_request_rows(request_id, "error", "dependency_failed")
                 self.db.execute("COMMIT")

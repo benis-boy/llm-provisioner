@@ -71,6 +71,15 @@ residency, concurrency, and buffering stay within proved operational limits.
 Detailed target contracts and sequencing:
 [`docs/queue-scheduler-resource-manager-plan.md`](../../../../docs/queue-scheduler-resource-manager-plan.md).
 
+Phase 2 durable queue-core implementation and its local acceptance exit are now
+complete: retained-RM HTTP scheduler-process recovery, receipt-before-queue-ack
+replay and operation-specific store fences pass 130 task-related tests, with the
+eight-test acceptance module passing three additional runs. Missing dependencies
+in damaged state fail durably through evaluation and both claim paths. This
+supports G1.1/G1.2/G2.1/G2.2/G3.1/G3.2 without changing their **partial** status:
+full scheduler interactions and qualifying real-provider/deployment E2E remain
+open. Phase completion is not leaf-goal completion.
+
 Implementation boundary: G1–G3 have SQLite/result primitives, durable optional
 functions, bounded eligibility evaluation, and an async scheduler with local
 integration evidence. G4 has a transport-neutral ResourceManager, artifact

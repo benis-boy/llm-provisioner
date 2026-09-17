@@ -4,7 +4,7 @@
 `ResourceManagerClient` session, and one fixed capacity profile.  It is an
 in-process seam or the tested RM HTTP client. The HTTP server selects its own
 provider and measured profile using client selectors, not client-supplied objects.
-The scheduler's own public HTTP endpoints remain unimplemented.
+The scheduler's own public HTTP endpoints also have local loopback coverage.
 
 ## Fences and recovery
 
@@ -25,7 +25,7 @@ the original reference) and never recomputes a template during submit replay.
 Capacity is read from RM before a durable claim; RM's `free_slots` is the sole
 occupancy authority, so the scheduler does not double-reserve it. Dispatch and
 outbox scans are bounded. A submit first persists the exact decoded bytes
-(content-addressed) and dispatch context. If its acknowledgement is lost, a
+(content-addressed) and dispatch context. If its acknowledgement is lost,
 the live session replays the same attempt key, content, and context;
 unstructured transport failure remains an outbox replay rather than consuming
 provider retry budget. Durable cancellation intents are sent before later

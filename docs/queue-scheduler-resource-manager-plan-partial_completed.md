@@ -1,7 +1,7 @@
 # QueueScheduler and ResourceManager bounded evidence ledger
 
-This ledger records bounded topics that are implemented and locally verified,
-without treating a slice as a completed phase or goal. The canonical open plan
+This ledger records completed phase exits and bounded locally verified topics,
+without treating local phase completion as a completed product goal. The canonical open plan
 is [queue-scheduler-resource-manager-plan.md](queue-scheduler-resource-manager-plan.md);
 return there for requirements, contracts, open checklists, exits, and decision
 ownership.
@@ -12,12 +12,56 @@ G0 (durable, truthful, capacity-aware asynchronous LLM work) and G1–G4 remain
 `partial`. **No leaf goal is done.** The evidence below is unit, local
 integration, synthetic, candidate-image, or locally run installed-adapter
 evidence. It is not a production deployment, measured capacity profile,
-qualifying production-boundary E2E, or proof that a whole phase is complete.
+qualifying production-boundary E2E. Phase 2 alone has met its local phase exit.
 The evidence does not replace the compatibility procedure, real concurrent
 capacity sweep, production image acceptance, restart/failure E2E, or operations
 work in the [canonical plan](queue-scheduler-resource-manager-plan.md).
 
-## Completed contract and queue slices
+## Phase 2 complete — Durable queue core
+
+Closed on 2026-09-17 against both the top-level checklist and detailed phase
+exit: request/attempt/result persistence, transactional append and grouped
+skip-line insertion, dependency validation, leases, idempotency and recovery;
+crash/restart, duplicate enqueue/delivery, cycles, blocked-head eligibility and
+result-handoff retry; actual ResourceManager reconciliation/outbox delivery and
+operation-specific guarded transitions.
+
+- The retained-parent RM HTTP acceptance test kills a scheduler subprocess after
+  submission acceptance, before acknowledgment and provider completion. Reopening
+  the same durable identity obtains a new RM session and attempt, settles the old
+  submit, rejects old RM controls with `scheduler_superseded`, and publishes the
+  replacement result. Same-session lost acknowledgment separately replays one
+  immutable dispatch key/input without duplicate provider execution.
+- A second subprocess creates the first verified publication receipt from the
+  persisted handoff, then exits before queue acknowledgment. Actual scheduler/RM
+  HTTP recovery acknowledges the retained handoff without provider execution or
+  another receipt. Shared-database publication remains atomically covered by the
+  scheduler suite; separate-database receipt replay is idempotent, not a claimed
+  distributed transaction.
+- Store guard coverage includes wrong attempt/session/generation, replaced-owner
+  acknowledgments, metadata replay/conflict, cancelled delivery, terminal no-ops,
+  retry budget and handoff-only completion. Missing dependencies in damaged state
+  now produce durable `dependency_failed` through evaluation and both claim paths,
+  without creating an attempt or submit. Public enqueue still rejects missing or
+  cyclic dependencies; no forward-reference semantics were added.
+- Ordering evidence includes blocked-head scans, dependency completion and
+  failure, grouped concurrent skip-line insertion and retrying anchors.
+
+Verification: **130 passed in 5.834s**, warnings treated as errors. The focused
+eight-test acceptance module additionally passed three runs in 0.437s, 0.449s
+and 0.447s. Targeted compilation and whitespace checks passed; final independent
+review found no remaining local Phase 2 defects. Stable IDs and the exact focused
+command are in the [proof inventory](../.opencode/skills/goal-oriented-design/references/e2e-proof.md#phase-2-durable-queue-core-completion-2026-09-17).
+Fixtures own temporary SQLite/result/receipt/profile state, subprocesses and
+loopback HTTP resources, including registered failure-path cleanup.
+
+This is **unit/local integration evidence**, with the real RM HTTP/core but a
+synthetic provider and profile. It does not prove RM-process crash persistence,
+real GPU/deployed restart, complete Phase 3 scheduler interactions, measured
+capacity, or Phase 6 production E2E. G1.1/G1.2/G2.1/G2.2/G3.1/G3.2 remain
+`partial`; closing this implementation phase does not weaken those targets.
+
+## Historical contract and queue slices
 
 - **Slice A — Contract foundation:** OpenAPI draft, typed request/attempt,
   function, provisioning-bucket and profile contracts, status adjacency, and
@@ -42,8 +86,8 @@ work in the [canonical plan](queue-scheduler-resource-manager-plan.md).
   ready/template execution, dependency result resolution, and single-use
   durable version/session/intent-fenced claim capabilities.
 
-These slices establish useful foundations, but their phase exits and
-production-boundary transition coverage remain open.
+These slices support the completed Phase 2 exit above. Remaining Phase 0/3
+contracts and scheduler coverage, and production-boundary proof, remain open.
 
 ## Transport and lifecycle boundaries
 
