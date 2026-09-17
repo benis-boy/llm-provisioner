@@ -455,3 +455,97 @@ retry budget, or error transition.
 Every leaf also requires multiple independent tests, including focused unit or
 contract coverage. Unit evidence alone cannot advance a leaf beyond
 **untested**.
+
+## Private Ollama supervision precursor (G0, G4.1, G4.3)
+
+`tests.unit.test_bootstrap_supervisor` (**unit**) uses test-owned local Python
+daemon processes, ephemeral loopback ports, temporary homes and synthetic typed
+GPU proof. It covers the pre-exec identity gate, occupied foreign listener
+refusal, strict bounded/fragmented version responses, total readiness deadline,
+pending-spawn ownership, concurrent/repeated cancellation, nested descendant
+cleanup, and previously pinned descendants changing session. PIDfds, not bare
+process groups, authorize destructive signals; identity mismatch tests assert
+foreign processes are not pinned or signalled. Tests release their own gates and
+collect child processes and transports.
+
+Focused command:
+`.venv/bin/python -W error -m unittest -v tests.unit.test_bootstrap_supervisor tests.unit.test_bootstrap_bindings tests.unit.test_python_process tests.unit.test_gpu_proof tests.unit.test_smollm_provider`.
+Latest run: **98 tests passed**, including pidfd closure when post-open identity
+verification raises, without emitted resource warnings;
+focused compilation and whitespace checks passed. No full discovery or real GPU
+run was performed for this slice.
+
+This is not production-boundary E2E. The common Python parent must capture GPU
+proof before Ollama and sibling Python workers start. Runtime composition, live
+dependency collection, approved image/deployment, and scheduler-to-GPU proof
+remain absent. Unobserved children that daemonize outside the tracked session
+require external containment; procfs/pidfd discovery is not a cgroup guarantee.
+Touched leaves remain **partial**.
+
+## Supervised runtime composition and live daemon candidate (2026-09-17)
+
+G0/G2.2/G4.1/G4.2/G4.3 **unit** evidence:
+`tests.unit.test_bootstrap_runtime`, `tests.integration.test_bootstrap_http`, and
+`tests.unit.test_resource_manager_shutdown` cover the composed loopback service,
+idle-unready then session-ready, exact result bytes through SSE, artifact/profile/
+free-space admission rejection, no repeated artifact hashing/provider creation
+from health, daemon-loss fencing, concurrent startup/stop, repeated cancellation,
+cleanup-stage failures and retained grace-timeout tasks. RM regressions preserve
+provider failure events and completed cancelled responses with no result, so
+shutdown fences do not erase watchdog progress. Tests own temporary selected
+artifact volumes, synthetic measured registries, result stores, fake daemon/GPU/
+providers, HTTP clients/listeners and task gates. This is not measured GPU proof.
+
+Command: `.venv/bin/python -W error -m unittest -v tests.unit.test_bootstrap_runtime tests.integration.test_bootstrap_http tests.unit.test_resource_manager_shutdown tests.unit.test_resource_manager tests.unit.test_resource_manager_health tests.integration.test_resource_manager_health_http tests.unit.test_bootstrap_supervisor tests.unit.test_bootstrap_bindings tests.unit.test_health_http tests.integration.test_resource_manager_http tests.unit.test_scheduler`
+— **141 passed in 32.034s**. Focused compilation and whitespace checks passed.
+Run only task-related suites going forward, not full discovery.
+
+G4.1/G4.3 **e2e candidate**: installed SmolLM → CoEdIT → GECToR → SmolLM
+switching passed again offline, now using `services.llm.bootstrap.supervisor.OwnedOllama`
+instead of the old harness launcher. Four successful responses, three replacements,
+stale submit/cancel rejection, CoEdIT cancelled-result fencing, and final
+provider/daemon/GPU cleanup passed. The tester verified its owned container
+`llm-three-model-adapter-check-supervised` absent. Foreign GPU processes were not
+manipulated. Image: `sha256:ec0af2cb045557602d42eb94c6645b3e330afa220d489bd34bc86bffb54ce108`;
+manifest: `7abbd93bd3e4ec01ba01f8e4581821ae1d2f35cab720695c1309596df5614a19`.
+The network-disabled build used the existing hash-locked wheelhouse.
+Command/environment/cleanup contract: [three-model check](../../../../docs/three-model-adapter-gpu-check.md).
+Focused `.venv/bin/python -W error -m unittest -v tests.unit.test_three_model_adapter_check tests.unit.test_bootstrap_supervisor tests.unit.test_resource_manager_shutdown`
+— **29 passed in 17.285s**.
+
+Profiles remain explicitly **unmeasured**. This is real supervisor/installed-adapter
+topology evidence, not composed HTTP runtime GPU E2E, memory-safe capacity,
+throughput-optimal concurrency, external containment or production image approval.
+All touched leaves remain **partial**.
+
+## Identity-fenced memory observation precursor (2026-09-17)
+
+G4.1/G4.2/G4.3 **unit** evidence: `tests.unit.test_gpu_memory` checks typed
+integer ranges, reserved bytes, unavailable/error telemetry, balanced NVML
+shutdown, worker-thread execution, supervisor loss/reuse and device UUID/count/
+MIG fences before and after reads, and full timestamp fence ordering.
+`tests.unit.test_three_model_adapter_check` checks six-point lifecycle ordering,
+minimal output schema, shared typed proof, explicitly unmeasured results,
+baseline/inference/final telemetry failures and changed UUID/total rejection.
+Tests own synthetic procfs directories, injected NVML and providers, and candidate
+temporary roots; failure cases assert owned cleanup and root removal.
+
+Command: `.venv/bin/python -W error -m unittest -v tests.unit.test_gpu_memory tests.unit.test_gpu_proof tests.unit.test_three_model_adapter_check tests.unit.test_bootstrap_supervisor`
+— **70 passed in 17.335s**. Focused compilation and whitespace checks passed.
+An intermediate test leak and a first-event chronology assertion were corrected
+before this final run; ordinary RM cleanup probes legitimately precede shutdown.
+
+G4.1/G4.3 **e2e candidate**: network-disabled build and real installed-adapter
+run passed with exact GPU `GPU-d15a7ff9-a19b-3ece-7510-759a0bca1963`, six ordered
+memory points and stable total **12,878,610,432 bytes**. Four successful responses,
+three model switches, one cancelled terminal event without a result, stale-result
+fencing and final owned cleanup passed. The tester owned
+`llm-three-model-memory-check` and verified it absent. RepoDigest (not image ID):
+`llm-compatibility-adapter@sha256:f53c0463a2c38de4a48fa139fee740214077709fa152455ccc840413763562a2`.
+Commands, output schema and ownership limits:
+[three-model check](../../../../docs/three-model-adapter-gpu-check.md).
+
+Memory points include foreign allocations, are not sampled execution peaks, and
+do not prove per-request incremental VRAM, a safety reserve, memory-safe `N` or
+optimal parallelism. No measured profile was produced. No full discovery was
+run. G4.1/G4.2/G4.3 remain **partial**.

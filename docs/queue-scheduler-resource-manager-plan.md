@@ -12,13 +12,16 @@ durable optional-function evaluation, an async QueueScheduler, a transport-neutr
 ResourceManager core, RM and scheduler HTTP/JSON/SSE bindings, artifact verification
 and experimental compatibility tools. A read-only selected-artifact verification
 HTTP endpoint and read-only exact measured-profile validation also exist. It does
-**not** yet contain capacity-measurement HTTP bindings, a supervised production
-bootstrap/image, or measured provisioning runtime. All three installable adapters
+**not** yet contain capacity-measurement HTTP bindings, an approved production
+image/deployment, or measured provisioning runtime. A supervised runtime
+composition now has focused local HTTP/lifecycle evidence. All three installable adapters
 now have candidate offline GPU evidence, including ResourceManager-mediated
 switching; that is not production deployment or measured capacity proof.
 Authoritative lifecycle-health wiring and strict offline configuration/artifact/
 measured-profile binding preflight now have local regression evidence. They still
-require the production supervisor and actual external dependency proofs.
+require runtime composition and actual external dependency proofs. A private
+Ollama supervisor now has focused local process-lifecycle evidence, not a
+supervised deployment proof.
 Unchecked work remains target-state design. Historical
 capacity notes are not implementation evidence.
 
@@ -34,8 +37,35 @@ artifact/runtime/GPU identities against read-only measured profiles before makin
 unloaded provider bindings; it does not start a production service. Full discovery
 passes **427 tests in 50.677s**, with compilation and whitespace checks passing.
 Synthetic profile fixtures and loopback/fake-provider tests remain unit evidence.
-Next integration boundary is the production-owned private Ollama supervisor,
-pre-child GPU capture, server lifecycle and live dependency proof collection.
+The next bounded supervisor slice adds `OwnedOllama` with a pre-exec identity
+gate, Linux pidfd-targeted signals, loopback listener ownership checks, bounded
+version responses, and cancellation-safe cleanup. The focused supervisor,
+bindings, Python-process, GPU-proof and SmolLM suites pass **98 tests**
+with warnings treated as errors. This is local fake-daemon evidence,
+not a real Ollama topology or deployment proof. Previously observed descendants
+remain tracked if they change process group/session. Arbitrary children that
+escape before observation require external containment; this module must not be
+treated as a cgroup or container owner.
+
+The composed runtime now captures GPU ownership before children, supervises the
+private daemon, serves RM and health together, rechecks live dependencies, and
+permanently fences admission/session results before bounded shutdown. Idle is
+unready without preventing a valid session start. Current artifact selection,
+exact profiles/runtime, SQLite WAL/free space, daemon ownership/version and
+active provider readiness gate work. **141 focused tests passed in 32.034s**;
+compilation and whitespace checks passed. Only task-related suites are run from
+this point forward; historical full-discovery counts below are not commands to rerun.
+
+The actual offline installed-adapter switching candidate also passed using
+`OwnedOllama`: four responses, three cleanup-gated replacements, stale controls
+rejected, cancelled output fenced, final owned daemon/provider/GPU cleanup, and
+the named container verified absent. Image:
+`sha256:ec0af2cb045557602d42eb94c6645b3e330afa220d489bd34bc86bffb54ce108`.
+Its **29-test** focused harness/supervisor/shutdown check passed separately.
+Profiles remain explicitly unmeasured. This proves the real supervisor topology
+for that candidate, not composed-server GPU readiness, capacity, or production
+deployment. Next boundaries are trustworthy memory/measurement instrumentation,
+real concurrent/native-batch execution evidence, and production packaging.
 
 - [x] **Slice A — Contract foundation:** OpenAPI draft, typed request/attempt,
   function, provisioning-bucket and profile contracts; status adjacency table;
@@ -138,6 +168,15 @@ pre-child GPU capture, server lifecycle and live dependency proof collection.
   routes. Production bootstrap wiring remains absent, so this is not deployed
   readiness or GPU proof. See [health HTTP boundary](health-http.md).
 - [ ] **Phase 6 — Production E2E, observability, deployment and runbooks.**
+
+- [x] **Supervised runtime composition precursor:** parent-rooted pre-child GPU
+  capture, explicit host-PID attestation, exact binding preflight, combined RM and
+  health HTTP, live dependency gates, daemon-loss termination, permanent RM
+  shutdown and retained bounded cleanup. Local synthetic-profile/provider tests
+  include exact loopback output, profile mutation, startup/stop races, repeated
+  cancellation and cleanup timeout. Real `OwnedOllama` has separate installed
+  three-model candidate evidence. No actual measured profile or approved image
+  is supplied by this slice.
 
 Verification: **294 tests passed** in 31.593 seconds using
 `.venv/bin/python -W error -m unittest discover -s tests -p 'test_*.py'`; compilation of services,
@@ -554,6 +593,18 @@ Modelfile. It never downloads.
 Provisioning bootstraps the actual ResourceManager and uses its normal adapter,
 residency, admission, timing, and cleanup paths. For each model, and for every
 configured Ollama context-size estimate, it performs:
+
+Implementation precursor: identity-fenced `LinuxGPUProof.memory()` now supplies
+off-loop, whole-device NVML total/used/free point observations. The offline
+installed-adapter candidate passed six ordered snapshots (before children,
+after four inference/residency checks, after owned cleanup), with stable exact
+GPU identity/total and no change to unmeasured admission. Seventy focused tests
+passed. This is not the runner described below: sparse post-inference points
+cannot prove peak incremental VRAM, a 20% reserve, memory-safe `N`, or throughput
+optimum. CoEdIT/GECToR still serialize batch-one worker calls; real simultaneous
+execution instrumentation and a suitable concurrent/native-batch path remain
+required before a higher-concurrency sweep. A successful p=1 check alone does
+not justify asserting `N=1`. See [candidate evidence](three-model-adapter-gpu-check.md).
 
 1. Build or validate a maximum-sized valid benchmark request. Prefer an adapter
    generator that creates locally valid input and verifies a valid non-empty

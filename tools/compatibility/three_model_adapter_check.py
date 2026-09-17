@@ -22,6 +22,8 @@ if str(ROOT) not in sys.path:
 
 from services.llm.provisioning.artifacts import SPECS, manifest, verify_manifest
 from services.llm.provisioning.volume import provision
+from services.llm.bootstrap.config import BootstrapConfig, ModelConfig
+from services.llm.bootstrap.supervisor import OwnedOllama
 from services.llm.providers.config import GPUProof, SmolLMProviderConfig
 from services.llm.providers.coedit import CoEdITProvider
 from services.llm.providers.gector import GECToRProvider
@@ -149,18 +151,29 @@ class _GateProvider:
 
 
 def _provider(model: str, root: Path, provisioned: dict, gpu: str, proof, runtime: str,
-              port: int, daemon_store: Path):
-    typed = GPUProof(proof.identity, proof.cleanup, proof.residency,
-                     expected_supervisor=proof.supervisor_identity)
+               port: int, daemon_store: Path):
+    if type(proof) is not GPUProof:
+        proof = GPUProof(proof.identity, proof.cleanup, proof.residency,
+                         expected_supervisor=proof.supervisor_identity)
     common = (root, provisioned["manifest_sha256"], _model_hash(provisioned, model), gpu, runtime,
               f"candidate-{model.lower()}-provider")
     if model == "SmolLM":
         return SmolLMProvider(SmolLMProviderConfig(*common, allowed_context_sizes=(512,), parallelism=1,
-            request_timeout_seconds=60, ollama_port=port, gpu_proof=typed, ollama_binary="/usr/bin/ollama",
+            request_timeout_seconds=60, ollama_port=port, gpu_proof=proof, ollama_binary="/usr/bin/ollama",
             ollama_home=adapter_check._runtime_home(daemon_store)))
     if model == "CoEdIT":
-        return CoEdITProvider(PythonProviderConfig(*common, bucket_identity=BUCKETS[model], gpu_proof=typed))
-    return GECToRProvider(GECToRProviderConfig(*common, bucket_identity=BUCKETS[model], gpu_proof=typed))
+        return CoEdITProvider(PythonProviderConfig(*common, bucket_identity=BUCKETS[model], gpu_proof=proof))
+    return GECToRProvider(GECToRProviderConfig(*common, bucket_identity=BUCKETS[model], gpu_proof=proof))
+
+
+def _bootstrap_config(root: Path, provisioned: dict, gpu: str, runtimes: dict[str, str],
+                      port: int, daemon_store: Path) -> BootstrapConfig:
+    return BootstrapConfig(
+        gpu, root / "artifacts", provisioned["manifest_sha256"], root / "profiles.sqlite",
+        Path("/usr/bin/ollama"), adapter_check._runtime_home(daemon_store), port,
+        {model: ModelConfig(runtimes[model], f"candidate-{model.lower()}-provider")
+         for model in MODEL_IDS},
+    )
 
 
 async def _reject_stale(rm, token: str, model: str, number: int) -> None:
@@ -188,6 +201,26 @@ async def _providers_clean(providers: list[_GateProvider]) -> bool:
     return bool(results) and all(result is True for result in results)
 
 
+def _memory_record(observation, sequence_index: int, label: str) -> dict:
+    return {"label": label, "sequence_index": sequence_index,
+            "start_ns": observation.start_ns, "end_ns": observation.end_ns,
+            "total_bytes": observation.total_bytes, "used_bytes": observation.used_bytes,
+            "free_bytes": observation.free_bytes}
+
+
+async def _observe_memory(proof, observations: list[dict], sequence_index: int,
+                          label: str, expected_gpu_uuid: str,
+                          expected: dict | None = None) -> dict:
+    observation = await proof.memory()
+    if observation.gpu_uuid != expected_gpu_uuid:
+        raise RuntimeError("GPU memory UUID changed or mismatched")
+    identity = {"gpu_uuid": observation.gpu_uuid, "total_bytes": observation.total_bytes}
+    if expected is not None and identity != expected:
+        raise RuntimeError("GPU memory identity or total capacity changed")
+    observations.append(_memory_record(observation, sequence_index, label))
+    return identity
+
+
 async def run(args: argparse.Namespace) -> dict:
     if not getattr(args, "host_pid_namespace", False):
         raise ValueError("--host-pid-namespace operator attestation is required")
@@ -195,26 +228,39 @@ async def run(args: argparse.Namespace) -> dict:
         raise ValueError("target GPU UUID is invalid")
     source = await asyncio.to_thread(_candidate_manifest, args.manifest, args.models_root)
     root = Path(tempfile.mkdtemp(prefix="three-model-adapter-check-"))
-    retain, daemon, drains, session, provider, proof = False, None, (), None, None, None
+    retain, daemon, session, provider, proof = False, None, None, None, None
     cleanup_ok = False
     begun: list[_GateProvider] = []
     try:
         # This mandatory capture occurs before starting any daemon or worker.
         proof = await asyncio.to_thread(LinuxGPUProof.capture, args.target_gpu_uuid, os.getpid(),
                                         Path("/proc"), None, host_pid_namespace=True)
+        memory_observations: list[dict] = []
+        memory_identity = await _observe_memory(proof, memory_observations, 0, "baseline",
+                                                args.target_gpu_uuid)
+        typed_proof = GPUProof(proof.identity, proof.cleanup, proof.residency,
+                               expected_supervisor=proof.supervisor_identity)
         provisioned = await asyncio.to_thread(provision, {m: args.models_root / m for m in SPECS}, root / "artifacts")
         if any(_selected(source["models"][m]) != _selected(provisioned["models"][m]) for m in SPECS):
             raise RuntimeError("provisioned selected files differ from source selection")
         daemon_store = root / "ollama-models"
-        daemon, _, drains = await adapter_check._start_server(args.port, daemon_store)
-        ollama_version = await adapter_check._health(args.port)
+        # The daemon receives the exact same typed proof as every provider.  It
+        # is created only after capture, so foreign GPU processes remain outside
+        # this ownership fence.
+        runtimes = {model: (_runtime_identity(model) if model != "SmolLM" else "ollama:0.11.6")
+                    for model in MODEL_IDS}
+        config = _bootstrap_config(root, provisioned, args.target_gpu_uuid, runtimes,
+                                   args.port, daemon_store)
+        daemon = OwnedOllama(config, typed_proof)
+        ollama_version = await daemon.start()
+        if ollama_version != "0.11.6":
+            raise RuntimeError("unexpected pinned Ollama version")
         rm = ResourceManager(cleanup_timeout=60, stop_timeout=60, load_timeout=240)
-        checks, transitions, cancel_fenced, runtimes = [], 0, False, {}
+        checks, transitions, cancel_fenced = [], 0, False
         for index, model in enumerate(SEQUENCE):
-            runtime = "ollama:" + ollama_version if model == "SmolLM" else _runtime_identity(model)
-            runtimes[model] = runtime
+            runtime = runtimes[model]
             wrapped = _GateProvider(_provider(model, root / "artifacts", provisioned, args.target_gpu_uuid,
-                                              proof, runtime, args.port, daemon_store), proof)
+                                              typed_proof, runtime, args.port, daemon_store), proof)
             begun.append(wrapped)
             previous = session.session_token if session else None
             session = await rm.start_session("three-model-adapter-check", MODEL_IDS[model],
@@ -252,6 +298,8 @@ async def run(args: argparse.Namespace) -> dict:
             residency = await proof.residency()
             if len(residency.runners) != 1:
                 raise RuntimeError(f"{model} did not prove exactly one resident runner")
+            memory_identity = await _observe_memory(proof, memory_observations, index + 1,
+                                                    model, args.target_gpu_uuid, memory_identity)
             checks.append(model)
             provider = wrapped
         old = session.session_token
@@ -259,15 +307,18 @@ async def run(args: argparse.Namespace) -> dict:
         if not await _providers_clean(begun):
             raise RuntimeError("an installed provider did not prove cleanup")
         await _reject_stale(rm, old, "SmolLM", len(SEQUENCE))
-        if not await adapter_check._cleanup_group(daemon, drains):
-            raise RuntimeError("owned Ollama daemon group did not terminate")
+        await daemon.close()
         daemon = None
         cleanup_ok = await proof.cleanup()
         if not cleanup_ok:
             raise RuntimeError("final shared GPU cleanup proof is false")
+        memory_identity = await _observe_memory(proof, memory_observations, 5,
+                                                "final_cleanup", args.target_gpu_uuid, memory_identity)
         return {"status": "passed-candidate", "model_sequence": list(SEQUENCE), "count": len(checks),
                 "switch_count": transitions, "profile": "unmeasured", "cleanup": cleanup_ok,
                 "stale_rejected": True, "cancel_fenced": cancel_fenced,
+                "memory_observations": memory_observations,
+                "gpu_uuid": memory_identity["gpu_uuid"],
                 "manifest_sha256": provisioned["manifest_sha256"],
                 "model_sha256": {m: _model_hash(provisioned, m) for m in SPECS}, "runtime": runtimes}
     except BaseException:
@@ -296,8 +347,8 @@ async def run(args: argparse.Namespace) -> dict:
         daemon_gone = daemon is None
         if daemon is not None:
             try:
-                daemon_gone = await adapter_check._cleanup_group(daemon, drains)
-                if not daemon_gone: errors.append("daemon_not_gone")
+                await daemon.close()
+                daemon_gone = True
             except BaseException as exc:
                 errors.append("daemon_cleanup_" + type(exc).__name__)
         gpu_clean = proof is None and not begun and daemon is None

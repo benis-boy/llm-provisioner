@@ -152,3 +152,26 @@ profiles before constructing all three unloaded real providers. Later resolution
 cannot expand the supported selector or admission capacity. Full discovery passes
 427 tests. These are unit/local-loopback proofs, not a supervised production
 bootstrap, actual measured capacity or deployment readiness; G4 remains partial.
+
+Private Ollama supervision now has focused local regression evidence for a
+pre-exec identity gate, pidfd-targeted process control, listener ownership,
+bounded health, cancellation and observed descendant cleanup. The focused
+supervisor/bindings/process/GPU-proof/SmolLM suites pass 98 tests. This does not
+establish arbitrary daemon-descendant containment, runtime composition, a
+production image, or scheduler-to-GPU E2E; G4.1/G4.3 remain partial.
+
+Supervised runtime composition now has local evidence for pre-child parent GPU
+capture, explicit namespace attestation, exact binding preflight, combined RM/
+health HTTP, live dependency admission gates and permanent shutdown with bounded
+retained cleanup. Focused verification passes 141 tests. The installed three-model
+offline candidate also passed with the production `OwnedOllama` supervisor and
+shared parent proof, including final owned cleanup (29 focused harness tests).
+Its profiles remain unmeasured. Actual composed-server GPU readiness, capacity
+measurement and production packaging remain gaps; G4.1/G4.2/G4.3 stay partial.
+
+Identity-fenced whole-device NVML memory observations now have 70 focused tests
+and an offline installed-adapter candidate with six ordered points and verified
+owned cleanup. They include foreign allocations and are not execution peaks,
+incremental per-request VRAM, or measured capacity. Concurrent provider execution,
+memory-safe bounds and throughput-optimal profiles remain unproved; G4.1/G4.2/
+G4.3 remain **partial**.

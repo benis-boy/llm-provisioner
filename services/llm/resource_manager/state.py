@@ -15,3 +15,4 @@ class ResourceManagerState:
     available: bool = False
     session_present: bool = False
     revision: int = 0
+    permanently_closed: bool = False

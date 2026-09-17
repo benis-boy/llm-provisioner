@@ -149,7 +149,7 @@ def _wire_states(states: Mapping[str, DependencyState]) -> dict[str, dict[str, A
             for name in DEPENDENCIES for state in [states.get(name, DependencyState(False, "state_missing"))]}
 
 
-def create_app(boundary: HealthBoundary) -> web.Application:
+def register_routes(app: web.Application, boundary: HealthBoundary) -> web.Application:
     if not isinstance(boundary, HealthBoundary): raise TypeError("boundary must be a HealthBoundary")
 
     def emit(value: dict[str, Any], status: int = 200) -> web.Response:
@@ -165,10 +165,15 @@ def create_app(boundary: HealthBoundary) -> web.Application:
         return emit({"ready": ok, "reasons": reasons}, 200 if ok else 503)
     async def dependencies(_request): return emit({"dependencies": _wire_states(await boundary.dependencies())})
 
-    app = web.Application(client_max_size=1)
     app.router.add_get("/health/live", live)
     app.router.add_get("/health/ready", ready)
     app.router.add_get("/health/dependencies", dependencies)
+    return app
+
+
+def create_app(boundary: HealthBoundary) -> web.Application:
+    app = web.Application(client_max_size=1)
+    register_routes(app, boundary)
     app.on_cleanup.append(lambda _app: boundary.close())
     return app
 

@@ -1,8 +1,14 @@
 # ResourceManager health wiring
 
-The resource manager exposes `snapshot()` as its only lifecycle observation
+The resource manager exposes `snapshot()` as its immutable lifecycle observation
 seam.  It returns an immutable `ResourceManagerState` and never includes
 provider, model, request, prompt, or exception text.
+
+Runtime shutdown publishes a permanent admission fence before waiting for an
+in-progress lifecycle operation.  This prevents a blocked load from reopening
+admission after shutdown; later starts remain rejected even if provider cleanup
+eventually returns. The revision changes with that fence, so in-flight health
+observations cannot be reused across it.
 
 The lifecycle is `startup` until a session is ready, `loading` while provider
 validation/loading/readiness is in progress, `unloading` while replacement or
@@ -39,5 +45,20 @@ are sanitized to the fixed `state_malformed` response. An asynchronous external
 callback is not run; its coroutine is closed when possible and its proof fails
 closed, avoiding an unawaited-coroutine warning.
 
-This is bootstrap precursor wiring only.  It does not load manifests/images,
-start servers, or establish production dependency probes.
+This remains bootstrap precursor wiring, not deployed readiness proof. The runtime
+composition now registers this boundary on the same aiohttp application as the
+ResourceManager routes.  Its external proofs remain conjunctive with the
+ResourceManager snapshot: idle startup is intentionally unready, and health
+does not create a session or load a model.  Daemon loss and runtime stop fence
+admission before cleanup; uncertain cleanup remains unready and is not silently
+upgraded by a later probe. Runtime external proof collection rechecks SQLite
+and free space, GPU identity, owned daemon/version/listener health, selected
+artifact manifest identity (full hashes are verified at startup),
+the exact pinned read-only measured profile, and installed runtime identities.
+SQLite/artifact work is bounded off the aiohttp loop; a health probe never loads
+or makes a provider resident.
+
+`probe_active_dependency()` calls the current provider's read-only readiness
+operation and rejects its observation if the lifecycle, revision, provider, or
+profile changes while it awaits. Initial idle readiness stays false; session
+start admission instead requires the startup dependencies and an available RM.

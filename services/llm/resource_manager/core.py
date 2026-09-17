@@ -86,6 +86,29 @@ class ResourceManager(ResourceManagerClient):
         self._lifecycle_tasks: set[asyncio.Task[object]] = set()
         self._cancelled_requests: set[tuple[str, str]] = set()
         self._phase = "startup"
+        self._permanently_closed = False
+        self._shutdown_task: asyncio.Task[None] | None = None
+
+    def fence_shutdown(self, *, reason: str = "runtime_stopped") -> None:
+        """Synchronously close admission and fence the current generation.
+
+        Runtime shutdown calls this before its first await.  Keeping this as a
+        public, synchronous operation prevents a callback which is already
+        running from publishing into a generation which shutdown has retired.
+        """
+        if self._permanently_closed:
+            return
+        self._permanently_closed = True
+        self._available = False
+        self._generation += 1
+        session = self._session
+        self._session = None
+        self._buffer.clear()
+        self._phase = "unloading" if session or self._provider else "startup"
+        for work in self._active.values():
+            work.cancelled = True
+        if session:
+            self._invalidate_locked(session, Failure(reason, reason, False))
 
     def snapshot(self) -> ResourceManagerState:
         """Return the authoritative synchronous lifecycle observation.
@@ -95,7 +118,59 @@ class ResourceManager(ResourceManagerClient):
         tasks.
         """
         return ResourceManagerState(self._phase, self._available,
-                                    self._session is not None, self._generation)
+                                    self._session is not None, self._generation,
+                                    self._permanently_closed)
+
+    async def shutdown(self, *, reason: str = "runtime_stopped") -> None:
+        """Fence admission and clean the current provider, without private callers.
+
+        Bootstrap uses this when the process is stopping or its daemon has died.
+        The synchronous fence is deliberately published before any provider
+        cleanup await; a cleanup failure therefore remains visible forever.
+        """
+        self.fence_shutdown(reason=reason)
+        if self._shutdown_task is None:
+            self._shutdown_task = asyncio.create_task(self._shutdown_cleanup())
+        await asyncio.shield(self._shutdown_task)
+
+    async def _shutdown_cleanup(self) -> None:
+        async with self._lifecycle_lock:
+            async with self._lock:
+                provider = self._provider
+            succeeded = False
+            try:
+                if provider:
+                    await self._cleanup(provider, timeout=self.stop_timeout)
+                succeeded = True
+            finally:
+                async with self._lock:
+                    if succeeded and self._phase == "unloading":
+                        self._provider = None
+                        self._profile = None
+                        self._phase = "startup"
+
+    async def probe_active_dependency(self, expected_profile: CapacityProfile | None = None
+                                      ) -> tuple[ResourceManagerState, int, bool]:
+        """Probe the active adapter without exposing provider internals.
+
+        The result is valid only when the same stable generation remains
+        active after ``ready`` returns; lifecycle changes fail closed.
+        """
+        async with self._lock:
+            state = self.snapshot()
+            provider, profile, revision = self._provider, self._profile, self._generation
+            if (state.phase != "stable" or not state.available or provider is None
+                    or profile is None or (expected_profile is not None and profile != expected_profile)):
+                return state, revision, False
+        try:
+            await provider.ready()
+        except Exception:
+            return self.snapshot(), revision, False
+        async with self._lock:
+            final = self.snapshot()
+            return final, revision, bool(
+                final == state and self._generation == revision and
+                self._provider is provider and self._profile == profile)
 
     @staticmethod
     def _key(value: str, name: str) -> None:
@@ -143,6 +218,8 @@ class ResourceManager(ResourceManagerClient):
         self._key(idempotency_key, "idempotency_key")
         args = (scheduler_id, ModelId(model_id), profile, provider)
         async with self._lifecycle_lock:
+            if self._permanently_closed or not self._available:
+                raise self._error("resource_manager_unavailable", "cleanup has failed")
             previous = self._start_records.get(idempotency_key)
             if previous:
                 if previous[0] != args:
@@ -152,7 +229,7 @@ class ResourceManager(ResourceManagerClient):
                 raise self._error("scheduler_superseded", "start replay belongs to an old session")
             self._validate_profile(model_id, profile)
             async with self._lock:
-                if not self._available:
+                if self._permanently_closed or not self._available:
                     raise self._error("resource_manager_unavailable", "cleanup has failed")
                 old = self._session
                 old_provider = self._provider
@@ -164,14 +241,12 @@ class ResourceManager(ResourceManagerClient):
                     self._buffer.clear()
                     for work in self._active.values():
                         work.cancelled = True
-                    self._terminal.add(old.session_token)
-                    self._emit_locked(old, EventKind.SESSION_INVALIDATED,
-                                      failure=Failure("scheduler_superseded", "session was replaced", False))
+                    self._invalidate_locked(old, Failure("scheduler_superseded", "session was replaced", False))
                 generation = max(self._generation + 1, old.generation + 1 if old else 1)
             if old and old_provider:
                 await self._cleanup(old_provider, timeout=self.cleanup_timeout)
             async with self._lock:
-                if not self._available:
+                if self._permanently_closed or not self._available:
                     raise self._error("resource_manager_unavailable", "cleanup has failed")
                 info = SessionInfo(scheduler_id, secrets.token_urlsafe(24), ModelId(model_id), generation)
                 self._session, self._profile, self._provider = info, profile, provider
@@ -194,16 +269,18 @@ class ResourceManager(ResourceManagerClient):
                 # A failed lifecycle may already own a loaded daemon model.  The
                 # same bounded cleanup fence used for replacement is mandatory
                 # before another session can be admitted.
-                try:
+                # A synchronous shutdown fence owns cleanup of a load which
+                # was still in flight.  Do not race that shared cleanup task.
+                if not (self._permanently_closed and self._session != info):
                     await self._cleanup(provider, timeout=self.cleanup_timeout)
-                except BaseException:
-                    raise
                 if isinstance(exc, ResourceManagerError):
                     raise
                 raise self._error("model_load_failed", str(exc)) from exc
             async with self._lock:
                 if self._session != info:
                     raise self._error("scheduler_superseded", "session was replaced")
+                if self._permanently_closed:
+                    raise self._error("resource_manager_unavailable", "resource manager is permanently stopped")
                 self._available = True
                 self._phase = "stable"
                 self._generation = info.generation
@@ -252,8 +329,8 @@ class ResourceManager(ResourceManagerClient):
                 raise self._error("cleanup_failed", "provider cleanup verification failed")
             async with self._lock:
                 self._active.clear()
-                self._available = True
-                if self._session is None:
+                self._available = not self._permanently_closed
+                if self._session is None and not self._permanently_closed:
                     self._phase = "startup"
         except ResourceManagerError:
             async with self._lock:
@@ -283,6 +360,13 @@ class ResourceManager(ResourceManagerClient):
         self._events.setdefault(token, deque(maxlen=self.max_events)).append(event)
         for waiter in self._waiters.pop(token, []):
             if not waiter.done(): waiter.set_result(None)
+
+    def _invalidate_locked(self, session: SessionInfo, failure: Failure) -> None:
+        """Invalidate a session at most once, including during loading."""
+        if session.session_token in self._terminal:
+            return
+        self._terminal.add(session.session_token)
+        self._emit_locked(session, EventKind.SESSION_INVALIDATED, failure=failure)
 
     def _check_session_locked(self, token: str) -> tuple[SessionInfo, CapacityProfile, Provider]:
         if not self._session or self._session.session_token != token:
@@ -406,7 +490,7 @@ class ResourceManager(ResourceManagerClient):
                 if cancelled:
                     self._emit_locked(work.session, EventKind.CANCELLED, request_id=work.request_id, attempt=work.attempt)
                 elif failure:
-                    if response is not None:
+                    if isinstance(response, ProviderResponse):
                         response_timing = (response.time_on_gpu_ms
                                            if response.gpu_timing_complete
                                            and isinstance(response.time_on_gpu_ms, int)
@@ -486,9 +570,7 @@ class ResourceManager(ResourceManagerClient):
                 self._session = None; self._available = False; self._buffer.clear()
                 self._phase = "unloading"
                 for work in self._active.values(): work.cancelled = True
-                self._terminal.add(session_token)
-                self._emit_locked(session, EventKind.SESSION_INVALIDATED,
-                                  failure=Failure(reason, reason, False))
+                self._invalidate_locked(session, Failure(reason, reason, False))
             if provider:
                 try: await self._cleanup(provider, timeout=self.stop_timeout)
                 except Exception: pass

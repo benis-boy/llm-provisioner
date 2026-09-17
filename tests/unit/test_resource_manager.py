@@ -195,7 +195,9 @@ class ResourceManagerTests(unittest.IsolatedAsyncioTestCase):
                 raise ResourceManagerError(__import__('services.llm.resource_manager.protocol', fromlist=['Failure']).Failure("bad", "bad", False))
         bad = Bad(); rm = ResourceManager(); s = await rm.start_session("s", ModelId.SMOLLM, profile(), bad, idempotency_key="s")
         await rm.submit(s.session_token, "r", "a", b"x", idempotency_key="r", context_size=128); await asyncio.sleep(.01)
-        self.assertFalse(rm._events[s.session_token][-1].failure.retryable)
+        failure = next(event.failure for event in reversed(rm._events[s.session_token])
+                        if event.failure is not None)
+        self.assertFalse(failure.retryable)
 
     async def test_incomplete_timing_is_null(self):
         class Incomplete(FakeProvider):

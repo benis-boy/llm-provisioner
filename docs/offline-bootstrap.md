@@ -1,10 +1,9 @@
 # Offline bootstrap preflight
 
-`services.llm.bootstrap` is a bounded precursor to production bootstrap.  It
-does **not** supervise a daemon, start children, load models, benchmark, probe
-an HTTP endpoint, or provide an approved image.  A later Linux supervisor must
-capture `LinuxGPUProof` and pass its typed `GPUProof` to this API before it
-creates any provider children.
+`prepare_bindings` is the read-only preflight API: it does not start children or
+measure capacity. `BootstrapRuntime` composes that API with parent GPU capture,
+private Ollama supervision, ResourceManager, and one HTTP/health listener.
+Neither API supplies an approved production image or measured capacity runner.
 
 ## Configuration
 
@@ -88,7 +87,47 @@ filesystem defense. Configuration and returned dataclasses are frozen only at
 their own fields (the bindings mapping is read-only); this is shallow Python
 immutability, not a promise that provider internals cannot later mutate.
 
-Remaining production work is the single fenced supervisor: capture/recheck
-Linux GPU ownership, perform the Ollama health handshake, start and fence
-children, load/ready/unload providers, expose the HTTP server, and retain
-cleanup ownership on cancellation or failure.
+## Runtime composition boundary
+
+`BootstrapRuntime` is the next composition slice.  It captures
+`LinuxGPUProof` in the common Python parent, with explicit host-PID-namespace
+attestation (`--host-pid-namespace`), before creating `OwnedOllama` or any
+provider.  The attestation is intentionally not inferred or defaulted.  It
+converts the captured Linux proof into the typed `GPUProof` required by the
+supervisor and providers. It then performs
+the exact state SQLite/free-space preflight, starts the one private daemon,
+observes the installed runtime identities, performs the read-only artifact and
+profile preflight, and exposes the existing ResourceManager and health routes
+from one aiohttp listener.  The daemon monitor is private: daemon loss fences
+ResourceManager admission and there is no independent daemon restart.
+
+Stop fences admission and the active session first, stops the listener, joins
+ResourceManager cleanup, closes HTTP/health, closes Ollama, and releases profiles.
+Concurrent and repeatedly-cancelled stop calls share one cleanup task. Every
+cleanup stage is attempted within one configured positive, at-most-300-second
+total grace (60 seconds by default). Timed-out tasks remain retained until they
+finish. A timeout or failure is recorded as unproved cleanup rather than claimed
+as clean. Daemon normal exit and exceptional monitor loss both fence admission;
+there is no daemon restart. The CLI also treats SIGINT/SIGTERM as a bounded
+stop request.
+
+The initial selected-file hashing is a full point-in-time check under the
+immutable mounted-volume precondition. Health subsequently rechecks the
+selected artifact, exact profile shape, runtime identities, GPU identity,
+daemon ownership, and SQLite/free-space in bounded workers. It never rehashes
+artifacts per request, and health probes do not load a provider, alter residency,
+or create a session. Startup idle is intentionally unready while a session may
+still be started through the normal ResourceManager API.
+
+Focused runtime/RM/health/scheduler verification passes **141 tests** with warnings
+as errors. The separate offline installed-adapter candidate now also exercises
+the real `OwnedOllama` with the shared parent proof; it still uses explicitly
+unmeasured profiles and does not start this composed HTTP service.
+
+This is still composition and local lifecycle evidence, not a production image
+or qualifying deployment proof.  The artifact check is point-in-time and
+requires the selected volume to remain immutable/read-only while providers use
+it.  Unobserved daemon descendants that escape before observation require
+external cgroup/container containment; procfs and pidfds are not a cgroup
+guarantee.  The runtime does not measure capacity, synthesize parallelism, run
+inference from health, download artifacts, or claim a production image.

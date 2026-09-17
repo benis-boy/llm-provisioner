@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 import threading
+import time
 from typing import Any
 
 
@@ -32,6 +33,19 @@ class ResidencyEvidence:
     gpu_uuid: str
     supervisor: ProcessIdentity
     runners: tuple[ProcessIdentity, ...]
+
+
+@dataclass(frozen=True)
+class GPUMemoryObservation:
+    """One fenced, device-wide NVML memory point observation."""
+
+    gpu_uuid: str
+    supervisor: ProcessIdentity
+    start_ns: int
+    end_ns: int
+    total_bytes: int
+    used_bytes: int
+    free_bytes: int
 
 
 @dataclass(frozen=True)
@@ -410,6 +424,43 @@ class LinuxGPUProof:
             # Both observations completed with no positively-owned runner.
             return True
 
+    def _memory_sync(self) -> GPUMemoryObservation:
+        with self._state_lock:
+            supervisor = self._supervisor
+            if supervisor is None or not self._baseline_empty:
+                raise GPUProofError("GPU proof was not captured")
+            start_ns = time.monotonic_ns()
+            try:
+                self._assert_identity(supervisor)
+                with self._nvml_session() as device:
+                    self._check_device(device)
+                    memory_fn = getattr(self._nvml, "nvmlDeviceGetMemoryInfo", None)
+                    if not callable(memory_fn):
+                        raise GPUProofError("NVML memory information API is unavailable")
+                    try:
+                        info = memory_fn(device)
+                        total = getattr(info, "total")
+                        used = getattr(info, "used")
+                        free = getattr(info, "free")
+                    except Exception as exc:
+                        raise GPUProofError("NVML memory information is unavailable or malformed") from exc
+                    values = (total, used, free)
+                    if any(type(value) is not int for value in values):
+                        raise GPUProofError("NVML memory fields must be integers")
+                    if total <= 0 or used < 0 or free < 0 or used > total or free > total:
+                        raise GPUProofError("NVML memory fields are out of range")
+                    if used + free > total:
+                        raise GPUProofError("NVML memory fields have an inconsistent sum")
+                    self._check_device(device)
+            except GPUProofError:
+                raise
+            except Exception as exc:
+                raise GPUProofError("GPU memory observation failed") from exc
+            self._assert_identity(supervisor)
+            end_ns = time.monotonic_ns()
+            return GPUMemoryObservation(self.target_uuid, supervisor, start_ns, end_ns,
+                                        total, used, free)
+
     async def identity(self) -> str:
         return await asyncio.to_thread(self._identity_sync)
 
@@ -418,3 +469,6 @@ class LinuxGPUProof:
 
     async def cleanup(self) -> bool:
         return await asyncio.to_thread(self._cleanup_sync)
+
+    async def memory(self) -> GPUMemoryObservation:
+        return await asyncio.to_thread(self._memory_sync)
