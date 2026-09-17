@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import inspect
 from pathlib import Path
 import re
 import threading
@@ -12,6 +13,10 @@ from typing import Any
 
 class GPUProofError(RuntimeError):
     """GPU or process ownership could not be proved."""
+
+
+class _ResidencyPending(GPUProofError):
+    """Ownership may become provable when a runner appears; never authority."""
 
 
 class _ProcessUnconnected(Exception):
@@ -49,6 +54,23 @@ class GPUMemoryObservation:
 
 
 @dataclass(frozen=True)
+class OwnedOllamaSnapshot:
+    """Current, fenced daemon topology; never GPU/NVML authority.
+
+    The private loopback endpoint and this stable owned topology together
+    attribute a model load.  Device memory remains supplemental evidence of a
+    device effect, not per-process attribution.
+    """
+
+    supervisor: ProcessIdentity
+    daemon: ProcessIdentity
+    descendants: tuple[ProcessIdentity, ...]
+    # A root broker is an additional, positively attested hop between the
+    # unprivileged supervisor and daemon.  Kept last for old positional callers.
+    broker: ProcessIdentity | None = None
+
+
+@dataclass(frozen=True)
 class _ProcessRecord:
     identity: ProcessIdentity
     parent: int
@@ -66,7 +88,41 @@ _COMPUTE_APIS = ("nvmlDeviceGetComputeRunningProcesses_v3",
 _GRAPHICS_APIS = ("nvmlDeviceGetGraphicsRunningProcesses_v3",
                   "nvmlDeviceGetGraphicsRunningProcesses_v2",
                   "nvmlDeviceGetGraphicsRunningProcesses_v1",
-                   "nvmlDeviceGetGraphicsRunningProcesses")
+                    "nvmlDeviceGetGraphicsRunningProcesses")
+RESIDENCY_SETTLE_TIMEOUT_SECONDS = 5.0
+RESIDENCY_SETTLE_INTERVAL_SECONDS = 0.2
+_NO_RESIDENT_RUNNER = "GPU has no resident runner"
+_RESIDENCY_DIAGNOSTIC_CATEGORIES = (
+    "strict_supervisor_descendant", "foreign_or_baseline",
+    "unreadable_or_unconnectable", "identity_or_ancestry_instability",
+)
+
+
+async def settle_residency(probe, *, timeout: float = RESIDENCY_SETTLE_TIMEOUT_SECONDS,
+                           interval: float = RESIDENCY_SETTLE_INTERVAL_SECONDS,
+                           sleep=asyncio.sleep, monotonic=time.monotonic) -> ResidencyEvidence:
+    """Return a stable positive residency proof after bounded NVML appearance lag.
+
+    Each successful probe still supplies the two-sample, nonempty ownership proof.
+    Only typed absence/pending observations may settle: malformed, uncertain, or
+    changed ownership evidence remains an immediate failure.
+    """
+    deadline = monotonic() + timeout
+    while True:
+        try:
+            value = probe()
+            return await value if inspect.isawaitable(value) else value
+        except asyncio.CancelledError:
+            raise
+        except _ResidencyPending as exc:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise
+            await sleep(min(interval, remaining))
+        except GPUProofError:
+            raise
+
+
 def _uuid(value: Any) -> str:
     if isinstance(value, bytes):
         try:
@@ -112,6 +168,10 @@ class LinuxGPUProof:
         self._baseline_process_count = 0
         self._owned_identities: set[ProcessIdentity] = set()
         self._state_lock = threading.RLock()
+        self._cleanup_reason = "not_checked"
+        self._last_residency_diagnostic = {"exact_child": 0,
+            "strict_supervisor_descendant": 0, "foreign_or_baseline": 0,
+            "unreadable_or_unconnectable": 0, "identity_mismatch": 0}
 
     @classmethod
     def capture(cls, target_uuid: str, supervisor_pid: int,
@@ -271,13 +331,15 @@ class LinuxGPUProof:
         if self._read_supervisor_record(expected.pid).identity != expected:
             raise GPUProofError("supervisor PID was reused or exited")
 
-    def _candidate_record(self, pid: int) -> _ProcessRecord:
+    def _candidate_record(self, pid: int, *, strict: bool = False) -> _ProcessRecord:
         try:
             return self._read_record(pid)
         except (GPUProofError, _ProcessUnconnected) as exc:
-            raise _ProcessUnconnected from exc
+            if not strict and isinstance(exc, GPUProofError):
+                raise _ProcessUnconnected from exc
+            raise
 
-    def _owned(self, leaf: int) -> ProcessIdentity:
+    def _owned(self, leaf: int, *, strict: bool = False) -> ProcessIdentity:
         supervisor = self._supervisor
         if supervisor is None or leaf == self.supervisor_pid:
             raise GPUProofError("supervisor proof is unavailable or PID is not a runner")
@@ -287,7 +349,7 @@ class LinuxGPUProof:
             if current in seen:
                 raise GPUProofError("process ancestry cycle")
             seen.add(current)
-            record = self._candidate_record(current)
+            record = self._candidate_record(current, strict=strict)
             first.append(record)
             if record.parent == self.supervisor_pid:
                 break
@@ -341,15 +403,85 @@ class LinuxGPUProof:
             return None
 
     def _classify_pids(self, pids: set[int]) -> set[ProcessIdentity]:
-        """Return only positively proven owned identities; unknown is ignored."""
+        """Return positively proven owned identities and bounded diagnostics.
+
+        Diagnostics are deliberately category-only.  They are not used to
+        accept a runner or to alter the ownership fence.
+        """
+        categories = {name: 0 for name in _RESIDENCY_DIAGNOSTIC_CATEGORIES}
         owned: set[ProcessIdentity] = set()
+        instability: GPUProofError | None = None
         for pid in pids:
             if pid == self.supervisor_pid:
                 raise GPUProofError("supervisor is using the GPU")
-            identity = self._owned_or_foreign(pid)
-            if identity is not None:
+            try:
+                # Generic residency keeps malformed/unreadable candidate
+                # records non-terminal, as it did before diagnostics were
+                # added; only a failed ancestry fence is instability.
+                identity = self._owned(pid)
+            except _ForeignProcess:
+                categories["foreign_or_baseline"] = min(1024, categories["foreign_or_baseline"] + 1)
+            except _ProcessUnconnected:
+                categories["unreadable_or_unconnectable"] = min(1024, categories["unreadable_or_unconnectable"] + 1)
+            except GPUProofError as exc:
+                categories["identity_or_ancestry_instability"] = min(
+                    1024, categories["identity_or_ancestry_instability"] + 1)
+                instability = exc
+            else:
+                categories["strict_supervisor_descendant"] = min(
+                    1024, categories["strict_supervisor_descendant"] + 1)
                 owned.add(identity)
+        self._last_residency_diagnostic = categories
+        if instability is not None:
+            raise instability
         return owned
+
+    def _classify_expected_runner(self, pids: set[int], expected: ProcessIdentity) -> set[ProcessIdentity]:
+        """Return only a fenced NVML record exactly equal to ``expected``.
+
+        The category counters are failure diagnostics, never an authorization
+        mechanism, and deliberately carry no PID or process metadata.
+        """
+        categories = {"exact_child": 0, "strict_supervisor_descendant": 0,
+                      "foreign_or_baseline": 0, "unreadable_or_unconnectable": 0,
+                      "identity_mismatch": 0}
+        runners: set[ProcessIdentity] = set()
+        for pid in pids:
+            if pid == self.supervisor_pid:
+                raise GPUProofError("supervisor is using the GPU")
+            try:
+                identity = self._owned(pid, strict=True)
+            except _ForeignProcess:
+                categories["foreign_or_baseline"] += 1
+            except _ProcessUnconnected:
+                categories["unreadable_or_unconnectable"] += 1
+            else:
+                if identity == expected:
+                    categories["exact_child"] += 1
+                    runners.add(identity)
+                elif identity.pid == expected.pid:
+                    categories["identity_mismatch"] += 1
+                else:
+                    categories["strict_supervisor_descendant"] += 1
+        self._last_residency_diagnostic = categories
+        return runners
+
+    @staticmethod
+    def _expected_runner_message(categories: dict[str, int]) -> str:
+        return "GPU expected runner was not proved; " + ";".join(
+            f"{name}={categories[name]}" for name in
+            ("exact_child", "strict_supervisor_descendant", "foreign_or_baseline",
+              "unreadable_or_unconnectable", "identity_mismatch"))
+
+    @staticmethod
+    def _residency_message(categories: dict[str, int]) -> str:
+        return _NO_RESIDENT_RUNNER + "; " + ";".join(
+            f"{name}={categories[name]}" for name in _RESIDENCY_DIAGNOSTIC_CATEGORIES)
+
+    def _assert_expected_runner_categories(self) -> None:
+        categories = self._last_residency_diagnostic
+        if categories["strict_supervisor_descendant"] or categories["identity_mismatch"]:
+            raise GPUProofError(self._expected_runner_message(categories))
 
     def _identity_sync(self) -> str:
         if self._supervisor is None:
@@ -375,17 +507,35 @@ class LinuxGPUProof:
         return self._baseline_process_count
 
     def _residency_sync(self) -> ResidencyEvidence:
+        return self._residency_for_runner_sync(None)
+
+    def _residency_for_runner_sync(self, expected_runner: ProcessIdentity | None) -> ResidencyEvidence:
         with self._state_lock:
             if self._supervisor is None or not self._baseline_empty:
                 raise GPUProofError("GPU proof was not captured")
             self._assert_identity(self._supervisor)
             with self._nvml_session() as device:
                 self._check_device(device)
-                first_owned = self._classify_pids(self._process_pids(device))
+                first_pids = self._process_pids(device)
+                first_owned = (self._classify_pids(first_pids) if expected_runner is None
+                               else self._classify_expected_runner(first_pids, expected_runner))
+                if expected_runner is not None:
+                    self._assert_expected_runner_categories()
                 runners = tuple(sorted(first_owned, key=lambda x: x.pid))
                 if not runners:
-                    raise GPUProofError("GPU has no resident runner")
-                second_owned = self._classify_pids(self._process_pids(device))
+                    if expected_runner is not None:
+                        categories = self._last_residency_diagnostic
+                        raise _ResidencyPending(self._expected_runner_message(categories))
+                    # A shared GPU commonly contains baseline processes. They
+                    # are deliberately not authority, but neither do they
+                    # make an owned runner's appearance terminal.
+                    raise _ResidencyPending(self._residency_message(
+                        self._last_residency_diagnostic))
+                second_pids = self._process_pids(device)
+                second_owned = (self._classify_pids(second_pids) if expected_runner is None
+                                else self._classify_expected_runner(second_pids, expected_runner))
+                if expected_runner is not None:
+                    self._assert_expected_runner_categories()
                 if second_owned != first_owned:
                     raise GPUProofError("owned GPU process set changed during ownership proof")
             self._assert_identity(self._supervisor)
@@ -395,6 +545,7 @@ class LinuxGPUProof:
     def _cleanup_sync(self) -> bool:
         with self._state_lock:
             if self._supervisor is None or not self._baseline_empty:
+                self._cleanup_reason = "proof_not_captured"
                 return False
             try:
                 self._assert_identity(self._supervisor)
@@ -402,6 +553,7 @@ class LinuxGPUProof:
                 # CleanupProbe is a boolean callback. A missing,
                 # unreadable, malformed, or reused supervisor is an inability
                 # to prove cleanup, never an exceptional positive result.
+                self._cleanup_reason = "supervisor_identity_unavailable"
                 return False
             try:
                 with self._nvml_session() as device:
@@ -411,8 +563,15 @@ class LinuxGPUProof:
                     second = self._process_pids(device)
                     second_owned = self._classify_pids(second)
                     if first_owned or second_owned:
+                        self._cleanup_reason = "owned_runner_present"
                         return False
-            except GPUProofError:
+            except BaseException:
+                # This is a boolean ownership callback.  In particular,
+                # nvmlShutdown() runs when the context exits and may itself
+                # fail after an otherwise clean sample.  That leaves cleanup
+                # unproved, rather than making a caller treat an exception as
+                # authority to proceed with replacement.
+                self._cleanup_reason = "gpu_cleanup_probe_failed"
                 return False
             try:
                 # Fence the clean NVML sample as well as the initial one. In
@@ -420,9 +579,17 @@ class LinuxGPUProof:
                 # reuse must not be reported as service cleanup.
                 self._assert_identity(self._supervisor)
             except (GPUProofError, _ProcessUnconnected):
+                self._cleanup_reason = "supervisor_identity_changed_after_probe"
                 return False
             # Both observations completed with no positively-owned runner.
+            self._cleanup_reason = "clean"
             return True
+
+    @property
+    def cleanup_reason(self) -> str:
+        """Return a bounded, non-sensitive reason from the last cleanup probe."""
+        with self._state_lock:
+            return self._cleanup_reason
 
     def _memory_sync(self) -> GPUMemoryObservation:
         with self._state_lock:
@@ -466,6 +633,19 @@ class LinuxGPUProof:
 
     async def residency(self) -> ResidencyEvidence:
         return await asyncio.to_thread(self._residency_sync)
+
+    async def residency_for_runner(self, expected_runner: ProcessIdentity) -> ResidencyEvidence:
+        if (type(expected_runner) is not ProcessIdentity or
+                type(expected_runner.pid) is not int or expected_runner.pid <= 0 or
+                type(expected_runner.start_time) is not int or expected_runner.start_time < 0):
+            raise GPUProofError("expected runner identity is invalid")
+        return await asyncio.to_thread(self._residency_for_runner_sync, expected_runner)
+
+    @property
+    def last_residency_diagnostic(self) -> dict[str, int]:
+        """Bounded category counts from the latest residency probe."""
+        with self._state_lock:
+            return dict(self._last_residency_diagnostic)
 
     async def cleanup(self) -> bool:
         return await asyncio.to_thread(self._cleanup_sync)

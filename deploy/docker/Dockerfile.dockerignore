@@ -3,6 +3,8 @@
 !deploy/docker/
 !deploy/docker/Dockerfile
 !deploy/docker/entrypoint.sh
+!deploy/docker/ollama-launcher.c
+!deploy/docker/compose.phase1.yml
 !deploy/docker/.inputs/
 !deploy/docker/.inputs/requirements.lock
 !deploy/docker/.inputs/ollama-linux-amd64.tgz

@@ -41,6 +41,42 @@ class PythonWorkerTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             _read(self.frame(request), gector=True)
 
+    def test_cuda_ready_rpc_schema_is_strict(self):
+        request = {"id": 1, "op": "cuda_ready"}
+        self.assertEqual(_read(self.frame(request)), request)
+        with self.assertRaises(RuntimeError):
+            _read(self.frame({**request, "input": "operator data"}))
+
+    def test_cuda_ready_retains_one_synchronized_device_allocation_for_worker_lifetime(self):
+        calls = []
+        witness = object()
+        class Torch:
+            class cuda:
+                @staticmethod
+                def synchronize(): calls.append("synchronize")
+            @staticmethod
+            def zeros(shape, *, device): calls.append(("zeros", shape, device)); return witness
+        runtime = Runtime(Path("/tmp"), {})
+        runtime.model = object()
+        with patch.dict(sys.modules, {"torch": Torch}):
+            self.assertTrue(runtime.cuda_ready())
+        self.assertEqual(calls, [("zeros", (1,), "cuda:0"), "synchronize"])
+        self.assertIs(runtime._cuda_residency_witness, witness)
+
+    def test_cuda_ready_rejects_an_unretained_allocation_result(self):
+        class Torch:
+            class cuda:
+                @staticmethod
+                def synchronize(): raise AssertionError("must not synchronize an absent allocation")
+            @staticmethod
+            def zeros(shape, *, device): return None
+        runtime = Runtime(Path("/tmp"), {})
+        runtime.model = object()
+        with patch.dict(sys.modules, {"torch": Torch}):
+            with self.assertRaisesRegex(RuntimeError, "allocation is unavailable"):
+                runtime.cuda_ready()
+        self.assertIsNone(runtime._cuda_residency_witness)
+
     def test_runtime_uses_full_single_string_framing_and_output_bound(self):
         seen=[]
         class Tokens(dict):

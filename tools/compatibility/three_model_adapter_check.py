@@ -15,6 +15,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -28,13 +29,15 @@ from services.llm.providers.config import GPUProof, SmolLMProviderConfig
 from services.llm.providers.coedit import CoEdITProvider
 from services.llm.providers.gector import GECToRProvider
 from services.llm.providers.gector_config import GECToRProviderConfig
-from services.llm.providers.gpu import LinuxGPUProof
+from services.llm.providers.gpu import (LinuxGPUProof, RESIDENCY_SETTLE_INTERVAL_SECONDS,
+                                         RESIDENCY_SETTLE_TIMEOUT_SECONDS, _ResidencyPending,
+                                         settle_residency)
 from services.llm.providers.python_config import PythonProviderConfig
 from services.llm.providers.smollm import SmolLMProvider
 from services.llm.queue.contracts import ModelId
 from services.llm.resource_manager.contracts import CapacityProfile, SampleMetadata
 from services.llm.resource_manager.core import ResourceManager, ResourceManagerError
-from services.llm.resource_manager.protocol import EventKind
+from services.llm.resource_manager.protocol import EventKind, Failure
 
 # The adapter image copies this helper as /opt/llm/adapter_check.py, whereas
 # source-tree unit tests import it as a package member.
@@ -51,6 +54,13 @@ BUCKETS = {
 }
 MODEL_IDS = {"SmolLM": ModelId.SMOLLM, "CoEdIT": ModelId.COEDIT, "GECToR": ModelId.GECTOR}
 SEQUENCE = ("SmolLM", "CoEdIT", "GECToR", "SmolLM")
+_CLEANUP_REASONS = frozenset({
+    "not_checked", "proof_not_captured", "supervisor_identity_unavailable",
+    "owned_runner_present", "gpu_cleanup_probe_failed",
+    "supervisor_identity_changed_after_probe", "clean",
+})
+CLEANUP_SETTLE_INTERVAL_SECONDS = 0.2
+CLEANUP_SETTLE_TIMEOUT_SECONDS = 5.0
 
 
 def _runtime_identity(model: str) -> str:
@@ -130,17 +140,42 @@ async def _terminal_events(rm, session, request_id: str, attempt: str) -> list:
 
 class _GateProvider:
     """Delegating provider whose load gate proves prior GPU cleanup."""
-    def __init__(self, provider, proof):
+    def __init__(self, provider, proof, *, cleanup_interval=CLEANUP_SETTLE_INTERVAL_SECONDS,
+                 cleanup_timeout=CLEANUP_SETTLE_TIMEOUT_SECONDS, sleep=asyncio.sleep,
+                 monotonic=time.monotonic):
         self.provider, self.proof = provider, proof
+        self.cleanup_interval = cleanup_interval
+        self.cleanup_timeout = cleanup_timeout
+        self._sleep = sleep
+        self._monotonic = monotonic
         self.entered, self.release = asyncio.Event(), asyncio.Event()
         self.gate = False
 
     def __getattr__(self, name):
         return getattr(self.provider, name)
 
+    async def _settle_cleanup(self) -> str | None:
+        """Observe owned cleanup until it settles, without widening authority."""
+        deadline = self._monotonic() + self.cleanup_timeout
+        while True:
+            try:
+                clean = await self.proof.cleanup()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return "gpu_cleanup_probe_failed"
+            if clean:
+                return None
+            reason = _cleanup_reason(self.proof)
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                return reason
+            await self._sleep(min(self.cleanup_interval, remaining))
+
     async def load(self, profile):
-        if not await self.proof.cleanup():
-            raise RuntimeError("shared GPU cleanup proof is false before load")
+        reason = await self._settle_cleanup()
+        if reason is not None:
+            raise RuntimeError(f"shared GPU cleanup proof is false before load; reason={reason}")
         await self.provider.load(profile)
 
     async def execute(self, request_id, payload):
@@ -154,7 +189,9 @@ def _provider(model: str, root: Path, provisioned: dict, gpu: str, proof, runtim
                port: int, daemon_store: Path):
     if type(proof) is not GPUProof:
         proof = GPUProof(proof.identity, proof.cleanup, proof.residency,
-                         expected_supervisor=proof.supervisor_identity)
+                          expected_supervisor=proof.supervisor_identity,
+                           residency_for_runner=getattr(proof, "residency_for_runner", None),
+                           memory=getattr(proof, "memory", None))
     common = (root, provisioned["manifest_sha256"], _model_hash(provisioned, model), gpu, runtime,
               f"candidate-{model.lower()}-provider")
     if model == "SmolLM":
@@ -194,11 +231,60 @@ async def _reject_stale(rm, token: str, model: str, number: int) -> None:
             raise RuntimeError(f"stale session {operation} was accepted")
 
 
-async def _providers_clean(providers: list[_GateProvider]) -> bool:
+async def _providers_clean(providers: list[_GateProvider], timeout: float) -> bool:
     """Require every begun installed provider to release its own resources."""
-    results = await asyncio.gather(*(provider.verify_cleanup() for provider in providers),
-                                   return_exceptions=True)
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*(provider.verify_cleanup() for provider in providers),
+                           return_exceptions=True), timeout)
+    except TimeoutError:
+        return False
     return bool(results) and all(result is True for result in results)
+
+
+def _safe_message(message: object) -> str:
+    """Keep diagnostics bounded and redact likely payload/process-table content."""
+    # Do not invoke arbitrary exception/object __str__: diagnostics are on a
+    # failure path and such a method can be hostile, blocking, or disclose a
+    # secret.  Failure.message is normally a plain string; anything else has
+    # no safe text representation at this boundary.
+    if type(message) is not str:
+        return "<unavailable>"
+    value = message[:160].replace("\r", " ").replace("\n", " ")
+    lowered = value.lower()
+    if ("{" in value or "[" in value or any(marker in lowered for marker in
+            ("prompt", "completion", "process", "token", "bearer", "authorization"))):
+        return "<redacted>"
+    value = re.sub(r"[^A-Za-z0-9 .,;:_=/()-]", "?", value)
+    return value[:160]
+
+
+def _cleanup_reason(proof) -> str:
+    reason = getattr(proof, "cleanup_reason", "cleanup_not_proved")
+    return reason if reason in _CLEANUP_REASONS else "cleanup_not_proved"
+
+
+def _remove_root(root: Path, errors: list[str]) -> None:
+    """Best-effort bounded storage cleanup; callers retain the root on failure."""
+    try:
+        shutil.rmtree(root)
+    except OSError:
+        errors.append("temporary_storage_cleanup_failed")
+
+
+def _transition_failure(exc: BaseException, transition: int, model: str,
+                        stage: str) -> BaseException:
+    """Add bounded lifecycle coordinates without exposing payload or runtime state."""
+    # Cancellation and other BaseException control flow must reach the caller
+    # unchanged.  Converting it to a diagnostic failure would make cancelled
+    # lifecycle work look like an ordinary failed transition.
+    if not isinstance(exc, Exception):
+        return exc
+    detail = f"transition={transition} model={model} stage={stage}"
+    if isinstance(exc, ResourceManagerError):
+        failure = exc.failure
+        return ResourceManagerError(Failure(failure.code, f"{detail}: {_safe_message(failure.message)}", failure.retryable))
+    return RuntimeError(f"{detail}: exception={type(exc).__name__}; message={_safe_message(exc)}")
 
 
 def _memory_record(observation, sequence_index: int, label: str) -> dict:
@@ -221,6 +307,27 @@ async def _observe_memory(proof, observations: list[dict], sequence_index: int,
     return identity
 
 
+async def _post_load_residency(proof, model=None, provider=None, *, sleep=asyncio.sleep,
+                               monotonic=time.monotonic):
+    """Require stable, positive ownership after a model load."""
+    try:
+        residency = await settle_residency(
+            proof.residency,
+            timeout=RESIDENCY_SETTLE_TIMEOUT_SECONDS,
+            interval=RESIDENCY_SETTLE_INTERVAL_SECONDS,
+            sleep=sleep,
+            monotonic=monotonic,
+        )
+    except _ResidencyPending:
+        accepted = getattr(provider, "accepted_model_specific_residency", None) if provider is not None else None
+        if model not in {"SmolLM", "CoEdIT", "GECToR"} or not callable(accepted) or not accepted():
+            raise
+        return None
+    if len(residency.runners) != 1:
+        raise RuntimeError("did not prove exactly one resident runner")
+    return residency
+
+
 async def run(args: argparse.Namespace) -> dict:
     if not getattr(args, "host_pid_namespace", False):
         raise ValueError("--host-pid-namespace operator attestation is required")
@@ -229,6 +336,7 @@ async def run(args: argparse.Namespace) -> dict:
     source = await asyncio.to_thread(_candidate_manifest, args.manifest, args.models_root)
     root = Path(tempfile.mkdtemp(prefix="three-model-adapter-check-"))
     retain, daemon, session, provider, proof = False, None, None, None, None
+    daemon_started = False
     cleanup_ok = False
     begun: list[_GateProvider] = []
     try:
@@ -238,8 +346,19 @@ async def run(args: argparse.Namespace) -> dict:
         memory_observations: list[dict] = []
         memory_identity = await _observe_memory(proof, memory_observations, 0, "baseline",
                                                 args.target_gpu_uuid)
+        def daemon_ownership_snapshot():
+            # The proof is intentionally assembled before daemon construction so
+            # the daemon and every provider receive one object.  Do not let the
+            # callback become an authority before that daemon has started.
+            if daemon is None or not daemon_started:
+                raise RuntimeError("Ollama ownership snapshot is unavailable before daemon startup")
+            return daemon.ownership_snapshot()
+
         typed_proof = GPUProof(proof.identity, proof.cleanup, proof.residency,
-                               expected_supervisor=proof.supervisor_identity)
+                                expected_supervisor=proof.supervisor_identity,
+                                residency_for_runner=proof.residency_for_runner,
+                                memory=proof.memory,
+                                ollama_ownership=daemon_ownership_snapshot)
         provisioned = await asyncio.to_thread(provision, {m: args.models_root / m for m in SPECS}, root / "artifacts")
         if any(_selected(source["models"][m]) != _selected(provisioned["models"][m]) for m in SPECS):
             raise RuntimeError("provisioned selected files differ from source selection")
@@ -253,62 +372,75 @@ async def run(args: argparse.Namespace) -> dict:
                                    args.port, daemon_store)
         daemon = OwnedOllama(config, typed_proof)
         ollama_version = await daemon.start()
+        daemon_started = True
         if ollama_version != "0.11.6":
             raise RuntimeError("unexpected pinned Ollama version")
         rm = ResourceManager(cleanup_timeout=60, stop_timeout=60, load_timeout=240)
         checks, transitions, cancel_fenced = [], 0, False
         for index, model in enumerate(SEQUENCE):
-            runtime = runtimes[model]
-            wrapped = _GateProvider(_provider(model, root / "artifacts", provisioned, args.target_gpu_uuid,
-                                              typed_proof, runtime, args.port, daemon_store), proof)
-            begun.append(wrapped)
-            previous = session.session_token if session else None
-            session = await rm.start_session("three-model-adapter-check", MODEL_IDS[model],
-                _profile(model, provisioned, args.target_gpu_uuid, runtime), wrapped,
-                idempotency_key=f"three-model-start-{index}")
-            if previous:
-                transitions += 1
-                await _reject_stale(rm, previous, model, index)
-            request_id, attempt = f"{model.lower()}-{index}", "attempt-1"
-            await rm.submit(session.session_token, request_id, attempt, _request(model),
-                idempotency_key=f"three-model-request-{index}",
-                context_size=512 if model == "SmolLM" else None,
-                bucket_identity=None if model == "SmolLM" else BUCKETS[model])
-            events = await _terminal_events(rm, session, request_id, attempt)
-            if not any(event.kind is EventKind.RESPONSE_FINISHED and _response_ok(model, event) for event in events):
-                raise RuntimeError(f"{model} response was not aligned and nonempty")
-            # Cancellation is a separate CoEdIT execution-entry fence; it does
-            # not substitute for that model's genuine successful response.
-            if model == "CoEdIT":
-                wrapped.gate = True
-                cancelled_id = "coedit-cancelled"
-                await rm.submit(session.session_token, cancelled_id, attempt, _request(model),
-                    idempotency_key="three-model-cancelled-request", bucket_identity=BUCKETS[model])
-                await asyncio.wait_for(wrapped.entered.wait(), 10)
-                if not await rm.cancel_request(session.session_token, cancelled_id,
-                                               idempotency_key="three-model-cancel"):
-                    raise RuntimeError("CoEdIT cancellation was not accepted")
-                wrapped.release.set()
-                cancelled = await _terminal_events(rm, session, cancelled_id, attempt)
-                if any(event.kind is EventKind.RESPONSE_FINISHED and event.result for event in cancelled):
-                    raise RuntimeError("cancelled CoEdIT execution published a result")
-                cancel_fenced = any(event.kind is EventKind.RESPONSE_FINISHED for event in cancelled)
-                if not cancel_fenced:
-                    raise RuntimeError("CoEdIT delegate completion was not observed")
-            residency = await proof.residency()
-            if len(residency.runners) != 1:
-                raise RuntimeError(f"{model} did not prove exactly one resident runner")
-            memory_identity = await _observe_memory(proof, memory_observations, index + 1,
-                                                    model, args.target_gpu_uuid, memory_identity)
-            checks.append(model)
-            provider = wrapped
+            stage = "construct"
+            try:
+                runtime = runtimes[model]
+                wrapped = _GateProvider(_provider(model, root / "artifacts", provisioned, args.target_gpu_uuid,
+                                                   typed_proof, runtime, args.port, daemon_store), proof)
+                begun.append(wrapped)
+                previous = session.session_token if session else None
+                stage = "start_session"
+                session = await rm.start_session("three-model-adapter-check", MODEL_IDS[model],
+                    _profile(model, provisioned, args.target_gpu_uuid, runtime), wrapped,
+                    idempotency_key=f"three-model-start-{index}")
+                if previous:
+                    transitions += 1
+                    stage = "stale_fence"
+                    await _reject_stale(rm, previous, model, index)
+                request_id, attempt = f"{model.lower()}-{index}", "attempt-1"
+                stage = "submit"
+                await rm.submit(session.session_token, request_id, attempt, _request(model),
+                    idempotency_key=f"three-model-request-{index}",
+                    context_size=512 if model == "SmolLM" else None,
+                    bucket_identity=None if model == "SmolLM" else BUCKETS[model])
+                stage = "complete"
+                events = await _terminal_events(rm, session, request_id, attempt)
+                if not any(event.kind is EventKind.RESPONSE_FINISHED and _response_ok(model, event) for event in events):
+                    raise RuntimeError("response was not aligned and nonempty")
+                # Cancellation is a separate CoEdIT execution-entry fence; it does
+                # not substitute for that model's genuine successful response.
+                if model == "CoEdIT":
+                    wrapped.gate = True
+                    cancelled_id = "coedit-cancelled"
+                    await rm.submit(session.session_token, cancelled_id, attempt, _request(model),
+                        idempotency_key="three-model-cancelled-request", bucket_identity=BUCKETS[model])
+                    await asyncio.wait_for(wrapped.entered.wait(), 10)
+                    if not await rm.cancel_request(session.session_token, cancelled_id,
+                                                    idempotency_key="three-model-cancel"):
+                        raise RuntimeError("CoEdIT cancellation was not accepted")
+                    wrapped.release.set()
+                    cancelled = await _terminal_events(rm, session, cancelled_id, attempt)
+                    if any(event.kind is EventKind.RESPONSE_FINISHED and event.result for event in cancelled):
+                        raise RuntimeError("cancelled CoEdIT execution published a result")
+                    cancel_fenced = any(event.kind is EventKind.RESPONSE_FINISHED for event in cancelled)
+                    if not cancel_fenced:
+                        raise RuntimeError("CoEdIT delegate completion was not observed")
+                stage = "residency"
+                await _post_load_residency(proof, model, wrapped.provider)
+                stage = "memory"
+                memory_identity = await _observe_memory(proof, memory_observations, index + 1,
+                                                        model, args.target_gpu_uuid, memory_identity)
+                checks.append(model)
+                provider = wrapped
+            except BaseException as exc:
+                failure = _transition_failure(exc, index, model, stage)
+                if failure is exc:
+                    raise
+                raise failure from exc
         old = session.session_token
         await rm.stop_session(old, reason="completed", idempotency_key="three-model-stop")
-        if not await _providers_clean(begun):
+        if not await _providers_clean(begun, rm.cleanup_timeout):
             raise RuntimeError("an installed provider did not prove cleanup")
         await _reject_stale(rm, old, "SmolLM", len(SEQUENCE))
         await daemon.close()
         daemon = None
+        daemon_started = False
         cleanup_ok = await proof.cleanup()
         if not cleanup_ok:
             raise RuntimeError("final shared GPU cleanup proof is false")
@@ -321,11 +453,12 @@ async def run(args: argparse.Namespace) -> dict:
                 "gpu_uuid": memory_identity["gpu_uuid"],
                 "manifest_sha256": provisioned["manifest_sha256"],
                 "model_sha256": {m: _model_hash(provisioned, m) for m in SPECS}, "runtime": runtimes}
-    except BaseException:
+    except BaseException as exc:
         # A failed first load can have started an owned worker even without a
         # session. Retention is decided only after every provider/daemon/GPU
         # cleanup proof below; GPU absence alone is not sufficient.
         retain = bool(begun)
+        primary_error = exc
         raise
     finally:
         errors = []
@@ -334,12 +467,15 @@ async def run(args: argparse.Namespace) -> dict:
                 await rm.stop_session(session.session_token, reason="finally", idempotency_key="three-model-finally")
                 cleanup_ok = proof is not None and await proof.cleanup()
                 retain = not cleanup_ok
+            except ResourceManagerError as exc:
+                if exc.failure.code != "scheduler_superseded":
+                    errors.append("session_cleanup_" + exc.failure.code)
             except BaseException as exc:
                 errors.append("session_cleanup_" + type(exc).__name__)
         providers_clean = not begun
         if begun:
             try:
-                providers_clean = await _providers_clean(begun)
+                providers_clean = await _providers_clean(begun, rm.cleanup_timeout)
                 if not providers_clean:
                     errors.append("provider_cleanup_not_proved")
             except BaseException as exc:
@@ -347,6 +483,7 @@ async def run(args: argparse.Namespace) -> dict:
         daemon_gone = daemon is None
         if daemon is not None:
             try:
+                daemon_started = False
                 await daemon.close()
                 daemon_gone = True
             except BaseException as exc:
@@ -361,10 +498,10 @@ async def run(args: argparse.Namespace) -> dict:
         cleanup_ok = providers_clean and daemon_gone and gpu_clean
         retain = not cleanup_ok
         if not retain and not errors:
-            shutil.rmtree(root)
-        else:
+            _remove_root(root, errors)
+        if retain or errors:
             print(f"three-model adapter check retained temporary storage: {root}", file=sys.stderr)
-        if errors:
+        if errors and "primary_error" not in locals():
             raise RuntimeError("cleanup failed: " + ",".join(errors))
 
 

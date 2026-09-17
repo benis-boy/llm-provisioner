@@ -7,7 +7,9 @@ import tempfile
 import unittest
 from unittest import mock
 
-from services.llm.providers.gpu import GPUProofError, LinuxGPUProof
+from services.llm.providers.gpu import (GPUProofError, LinuxGPUProof,
+                                        ProcessIdentity, ResidencyEvidence,
+                                        _ResidencyPending, settle_residency)
 
 
 def write_stat(root: Path, pid: int, parent: int, start: int = 1,
@@ -38,12 +40,14 @@ class FakeNVML:
         self.count = 1
         self.mig = [0, 0]
         self.shutdowns = 0
-        self.init_error = self.handle_error = None
+        self.init_error = self.handle_error = self.shutdown_error = None
         self.compute_v3_error = None
 
     def nvmlInit(self):
         if self.init_error: raise self.init_error
-    def nvmlShutdown(self): self.shutdowns += 1
+    def nvmlShutdown(self):
+        self.shutdowns += 1
+        if self.shutdown_error: raise self.shutdown_error
     def nvmlDeviceGetCount(self): return self.count
     def nvmlDeviceGetHandleByIndex(self, index):
         if self.handle_error: raise self.handle_error
@@ -99,6 +103,43 @@ class GPUProofTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.proof.cleanup())
         self.nvml.compute = []
         self.assertTrue(await self.proof.cleanup())
+
+    async def test_residency_settlement_retries_pending_runner_observation(self):
+        runner = ProcessIdentity(11, 2)
+        calls, now = [], [0.0]
+        async def probe():
+            calls.append(None)
+            if len(calls) < 3:
+                raise _ResidencyPending("GPU has no resident runner")
+            return ResidencyEvidence("GPU-test", self.proof.supervisor_identity, (runner,))
+        async def sleep(delay): now[0] += delay
+        evidence = await settle_residency(probe, timeout=1, interval=.2, sleep=sleep,
+                                          monotonic=lambda: now[0])
+        self.assertEqual((runner,), evidence.runners)
+        self.assertEqual(3, len(calls))
+
+    async def test_residency_settlement_persistent_pending_and_other_proof_errors_fail_closed(self):
+        now = [0.0]
+        async def empty(): raise _ResidencyPending("GPU has no resident runner")
+        async def sleep(delay): now[0] += delay
+        with self.assertRaisesRegex(GPUProofError, "no resident runner"):
+            await settle_residency(empty, timeout=.4, interval=.2, sleep=sleep,
+                                   monotonic=lambda: now[0])
+        async def uncertain(): raise GPUProofError("supervisor PID was reused or exited")
+        with self.assertRaisesRegex(GPUProofError, "supervisor PID"):
+            await settle_residency(uncertain, timeout=1, sleep=sleep,
+                                   monotonic=lambda: now[0])
+
+    async def test_residency_settlement_propagates_cancellation(self):
+        sleeping = asyncio.Event()
+        async def empty(): raise _ResidencyPending("GPU has no resident runner")
+        async def sleep(delay):
+            sleeping.set()
+            await asyncio.Event().wait()
+        task = asyncio.create_task(settle_residency(empty, sleep=sleep))
+        await sleeping.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError): await task
 
     async def test_shared_gpu_foreign_processes_are_filtered_and_churn_is_tolerated(self):
         write_stat(self.root, 20, 1)
@@ -156,6 +197,136 @@ class GPUProofTests(unittest.IsolatedAsyncioTestCase):
         evidence = await self.proof.residency()
         self.assertEqual((11,), tuple(item.pid for item in evidence.runners))
 
+    async def test_residency_pending_for_empty_or_foreign_only_nvml(self):
+        with self.assertRaisesRegex(GPUProofError, "no resident runner"):
+            await self.proof.residency()
+        write_stat(self.root, 20, 1)
+        self.nvml.compute = [20]
+        with self.assertRaisesRegex(GPUProofError, "foreign_or_baseline=1"):
+            await self.proof.residency()
+
+    async def test_persistent_foreign_residency_reports_category_only_diagnostic(self):
+        write_stat(self.root, 20, 1)
+        self.nvml.compute = [20]
+        now = [0.0]
+        async def sleep(delay): now[0] += delay
+        with self.assertRaisesRegex(GPUProofError,
+                "GPU has no resident runner; strict_supervisor_descendant=0;"
+                "foreign_or_baseline=1;unreadable_or_unconnectable=0;"
+                "identity_or_ancestry_instability=0") as raised:
+            await settle_residency(self.proof.residency, timeout=.4, interval=.2,
+                                   sleep=sleep, monotonic=lambda: now[0])
+        self.assertNotIn("20", str(raised.exception))
+        self.assertEqual({"strict_supervisor_descendant": 0, "foreign_or_baseline": 1,
+                          "unreadable_or_unconnectable": 0,
+                          "identity_or_ancestry_instability": 0},
+                         self.proof.last_residency_diagnostic)
+
+    async def test_persistent_unreadable_residency_reports_category_only_diagnostic(self):
+        self.nvml.compute = [30]
+        now = [0.0]
+        async def sleep(delay): now[0] += delay
+        with self.assertRaisesRegex(GPUProofError,
+                "GPU has no resident runner; strict_supervisor_descendant=0;"
+                "foreign_or_baseline=0;unreadable_or_unconnectable=1;"
+                "identity_or_ancestry_instability=0") as raised:
+            await settle_residency(self.proof.residency, timeout=.4, interval=.2,
+                                   sleep=sleep, monotonic=lambda: now[0])
+        self.assertNotIn("30", str(raised.exception))
+
+    async def test_expected_runner_requires_exact_identity_and_reports_only_categories(self):
+        write_stat(self.root, 11, 10, 2)
+        write_stat(self.root, 12, 10, 3)
+        write_stat(self.root, 20, 1, 4)
+        self.nvml.compute = [11]
+        evidence = await self.proof.residency_for_runner(ProcessIdentity(11, 2))
+        self.assertEqual((ProcessIdentity(11, 2),), evidence.runners)
+        self.nvml.compute = [11, 12, 20, 30]
+        with self.assertRaisesRegex(GPUProofError, "exact_child=0;strict_supervisor_descendant=1;foreign_or_baseline=1;unreadable_or_unconnectable=1;identity_mismatch=1") as raised:
+            await self.proof.residency_for_runner(ProcessIdentity(11, 99))
+        self.assertNotIn("11", str(raised.exception))
+        self.assertEqual({"exact_child": 0, "strict_supervisor_descendant": 1,
+                           "foreign_or_baseline": 1, "unreadable_or_unconnectable": 1,
+                           "identity_mismatch": 1}, self.proof.last_residency_diagnostic)
+
+    async def test_expected_runner_rejects_exact_child_with_strict_extra_immediately(self):
+        write_stat(self.root, 11, 10, 2)
+        write_stat(self.root, 12, 10, 3)
+        calls = 0
+
+        def compute(device):
+            nonlocal calls
+            calls += 1
+            return [Process(11), Process(12)]
+
+        with mock.patch.object(self.nvml, "nvmlDeviceGetComputeRunningProcesses_v3",
+                               side_effect=compute):
+            with self.assertRaisesRegex(GPUProofError, "exact_child=1;strict_supervisor_descendant=1"):
+                await self.proof.residency_for_runner(ProcessIdentity(11, 2))
+        self.assertEqual(1, calls)
+
+    async def test_expected_runner_rejects_strict_extra_on_second_sample(self):
+        write_stat(self.root, 11, 10, 2)
+        write_stat(self.root, 12, 10, 3)
+        samples = iter(([Process(11)], [Process(11), Process(12)]))
+
+        with mock.patch.object(self.nvml, "nvmlDeviceGetComputeRunningProcesses_v3",
+                               side_effect=lambda device: next(samples)):
+            with self.assertRaisesRegex(GPUProofError, "exact_child=1;strict_supervisor_descendant=1"):
+                await self.proof.residency_for_runner(ProcessIdentity(11, 2))
+
+    async def test_expected_runner_empty_nvml_settles_then_proves_exact_child(self):
+        write_stat(self.root, 11, 10, 2)
+        runner = ProcessIdentity(11, 2)
+        now, sleeps = [0.0], []
+
+        async def sleep(delay):
+            sleeps.append(delay)
+            now[0] += delay
+
+        with mock.patch.object(self.nvml, "nvmlDeviceGetComputeRunningProcesses_v3",
+                               side_effect=([], [Process(11)], [Process(11)])):
+            evidence = await settle_residency(
+                lambda: self.proof.residency_for_runner(runner),
+                timeout=1, interval=.2, sleep=sleep, monotonic=lambda: now[0])
+
+        self.assertEqual((runner,), evidence.runners)
+        self.assertEqual([.2], sleeps)
+
+    async def test_expected_runner_foreign_only_is_retryable_until_timeout(self):
+        write_stat(self.root, 20, 1)
+        self.nvml.compute = [20]
+        calls = []
+
+        async def probe():
+            calls.append(None)
+            return await self.proof.residency_for_runner(ProcessIdentity(11, 2))
+
+        now = [0.0]
+        async def sleep(delay): now[0] += delay
+        with self.assertRaisesRegex(GPUProofError, "expected runner was not proved"):
+            await settle_residency(probe, timeout=.4, interval=.2, sleep=sleep,
+                                   monotonic=lambda: now[0])
+        self.assertEqual(3, len(calls))
+
+    async def test_foreign_baseline_does_not_block_delayed_owned_runner(self):
+        write_stat(self.root, 20, 1)
+        write_stat(self.root, 11, 10, 2)
+        self.nvml.compute = [20]
+        samples = iter(([Process(20)], [Process(20)], [Process(11), Process(20)],
+                        [Process(11), Process(20)]))
+        with mock.patch.object(self.nvml, "nvmlDeviceGetComputeRunningProcesses_v3",
+                               side_effect=lambda device: next(samples)):
+            now = [0.0]
+            async def sleep(delay): now[0] += delay
+            evidence = await settle_residency(self.proof.residency, timeout=1, interval=.2,
+                                               sleep=sleep, monotonic=lambda: now[0])
+        self.assertEqual((11,), tuple(item.pid for item in evidence.runners))
+
+    async def test_expected_runner_rejects_malformed_identity_without_sampling(self):
+        with self.assertRaisesRegex(GPUProofError, "expected runner identity is invalid"):
+            await self.proof.residency_for_runner(ProcessIdentity(0, 1))
+
     async def test_residency_ignores_absent_unreadable_and_malformed_extra_pids(self):
         write_stat(self.root, 11, 10)
         (self.root / "31").mkdir()
@@ -172,6 +343,11 @@ class GPUProofTests(unittest.IsolatedAsyncioTestCase):
         write_stat(self.root, 11, 10)
         self.nvml.compute = [11]
         self.assertFalse(await self.proof.cleanup())
+
+    async def test_cleanup_fails_closed_when_nvml_shutdown_is_uncertain(self):
+        self.nvml.shutdown_error = RuntimeError("backend shutdown failed")
+        self.assertFalse(await self.proof.cleanup())
+        self.assertEqual("gpu_cleanup_probe_failed", self.proof.cleanup_reason)
 
     async def test_residency_rejects_unknown_to_owned_transition(self):
         write_stat(self.root, 11, 10)

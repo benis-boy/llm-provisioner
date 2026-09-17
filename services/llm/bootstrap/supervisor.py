@@ -8,7 +8,9 @@ import json
 import math
 import os
 from pathlib import Path
+import pwd
 import signal
+import stat
 import sys
 import time
 from typing import Any
@@ -17,7 +19,8 @@ import aiohttp
 
 from .config import BootstrapConfig
 from services.llm.providers.config import GPUProof
-from services.llm.providers.gpu import ProcessIdentity
+from services.llm.providers.gpu import ProcessIdentity, OwnedOllamaSnapshot
+from .ollama_broker_client import BrokerClient
 
 
 class OllamaSupervisorError(RuntimeError):
@@ -65,7 +68,7 @@ class OwnedOllama:
 
     def __init__(self, config: BootstrapConfig, gpu_proof: GPUProof, *,
                  startup_timeout: float = 30.0, command: list[str] | None = None,
-                 output_limit: int = 256 * 1024) -> None:
+                 output_limit: int = 256 * 1024, launch_user: bool = False) -> None:
         if type(config) is not BootstrapConfig:
             raise TypeError("validated BootstrapConfig is required")
         if type(gpu_proof) is not GPUProof or type(gpu_proof.expected_supervisor) is not ProcessIdentity:
@@ -83,9 +86,25 @@ class OwnedOllama:
             raise ValueError("output limit is out of bounds")
         self.config, self.gpu_proof = config, gpu_proof
         self.startup_timeout, self.output_limit = float(startup_timeout), output_limit
-        self.command = tuple(command or (str(config.ollama_binary), "serve"))
+        if type(launch_user) is not bool:
+            raise ValueError("launch_user must be boolean")
+        self.launch_user = launch_user
+        self.command = tuple(command or (("/usr/local/bin/llm-ollama-launch",)
+                                         if Path("/usr/local/bin/llm-ollama-launch").exists()
+                                         else (str(config.ollama_binary), "serve")))
         if not self.command or any(not isinstance(x, str) or not x for x in self.command):
             raise ValueError("invalid Ollama command")
+        # The image gateway is a complete, fixed root broker (not an Ollama
+        # executable).  Keep the established direct supervisor for tools and
+        # tests that provide a command, while production uses the broker.
+        self._broker = (BrokerClient(gpu_proof.expected_supervisor)
+                         if command is None and Path("/usr/local/bin/llm-ollama-launch").exists()
+                         else None)
+        if self._broker is not None and (
+                config.ollama_binary != Path("/usr/local/bin/ollama") or
+                config.ollama_home != Path("/var/lib/ollama") or config.ollama_port != 11434 or
+                config.models["SmolLM"].runtime_identity != "ollama:0.11.6"):
+            raise ValueError("image Ollama configuration must match the fixed broker")
         self.process: asyncio.subprocess.Process | None = None
         self._fence: _Fence | None = None
         self._stdout_task: asyncio.Task[None] | None = None
@@ -119,9 +138,19 @@ class OwnedOllama:
                 "NVIDIA_DRIVER_CAPABILITIES", "TMPDIR", "TEMP", "TMP") if key in os.environ}
         home = self.config.ollama_home
         models = home / "models"
-        home.mkdir(mode=0o700, parents=True, exist_ok=True)
-        models.mkdir(mode=0o700, parents=True, exist_ok=True)
-        home.chmod(0o700)
+        if self.launch_user or self.command[0] == "/usr/local/bin/llm-ollama-launch":
+            try:
+                owner = pwd.getpwnam("ollama").pw_uid
+                for path in (home, models):
+                    info = path.stat()
+                    if info.st_uid != owner or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                        raise OllamaSupervisorError("Ollama state ownership or mode is unsafe")
+            except (KeyError, OSError) as exc:
+                raise OllamaSupervisorError("Ollama state is unavailable or unsafe") from exc
+        else:
+            home.mkdir(mode=0o700, parents=True, exist_ok=True)
+            models.mkdir(mode=0o700, parents=True, exist_ok=True)
+            home.chmod(0o700)
         env.update({"PATH": env.get("PATH", "/usr/bin:/bin"), "HOME": str(home),
                     "OLLAMA_MODELS": str(models), "OLLAMA_HOST": f"127.0.0.1:{self.port}",
                     "OLLAMA_NUM_PARALLEL": "1", "OLLAMA_MAX_LOADED_MODELS": "1"})
@@ -266,7 +295,32 @@ class OwnedOllama:
             return False
         try:
             fd_dir = Path("/proc") / str(self.process.pid) / "fd"
-            found = {os.readlink(fd) for fd in fd_dir.iterdir() if fd.is_symlink()}
+            # Linux gates /proc/PID/fd with filesystem credentials.  The check
+            # compares both fsuid and fsgid, so change the fixed child's pair on
+            # this thread only; no application capability is retained.
+            libc = ctypes.CDLL(None, use_errno=True) if self.launch_user else None
+            previous_uid = previous_gid = None
+            try:
+                if libc is not None:
+                    account = pwd.getpwnam("ollama")
+                    previous_gid = libc.setfsgid(account.pw_gid)
+                    if libc.setfsgid(-1) != account.pw_gid:
+                        raise OllamaSupervisorError("Ollama filesystem group identity unavailable")
+                    previous_uid = libc.setfsuid(account.pw_uid)
+                    if libc.setfsuid(-1) != account.pw_uid:
+                        raise OllamaSupervisorError("Ollama filesystem identity unavailable")
+                found = {os.readlink(fd) for fd in fd_dir.iterdir() if fd.is_symlink()}
+            finally:
+                if libc is not None:
+                    restore_error = False
+                    if previous_uid is not None:
+                        libc.setfsuid(previous_uid)
+                        restore_error |= libc.setfsuid(-1) != previous_uid
+                    if previous_gid is not None:
+                        libc.setfsgid(previous_gid)
+                        restore_error |= libc.setfsgid(-1) != previous_gid
+                    if restore_error:
+                        raise OllamaSupervisorError("broker filesystem identity restoration failed")
         except OSError:
             return False
         owned = {"socket:[%d]" % inode for inode in inodes}
@@ -315,9 +369,13 @@ class OwnedOllama:
         This is deliberately a readiness-only seam: it does not load a model
         or otherwise change daemon residency.
         """
+        if self._broker is not None:
+            return await self._broker.health()
         return await self._health(remaining)
 
     async def start(self) -> str:
+        if self._broker is not None:
+            return await self._broker.start()
         async with self._state:
             if self._started or self.process is not None or self._starting or self._spawn is not None:
                 raise OllamaSupervisorError("Ollama ownership is not clean")
@@ -332,10 +390,26 @@ class OwnedOllama:
                 self._starting = False
                 raise OllamaSupervisorError("could not establish child subreaper")
             deadline = time.monotonic() + self.startup_timeout
+            kwargs = {}
+            if self.launch_user:
+                try:
+                    account = pwd.getpwnam("ollama")
+                except KeyError as exc:
+                    raise OllamaSupervisorError("ollama service identity is unavailable") from exc
+                kwargs.update(user=account.pw_uid, group=account.pw_gid,
+                              extra_groups=os.getgrouplist(account.pw_name, account.pw_gid))
+            launcher_args = ()
+            if self.launch_user:
+                # This is an internal root-to-ollama handoff, not caller input.
+                # The gate rechecks this exact broker identity around PDEATHSIG.
+                parent = _identity(os.getpid())
+                launcher_args = ("--expected-parent", str(parent.pid),
+                                 str(parent.start_time), "--")
             spawn = asyncio.create_task(asyncio.create_subprocess_exec(
-                sys.executable, "-m", "services.llm.bootstrap.ollama_launcher", *self.command,
+                sys.executable, "-m", "services.llm.bootstrap.ollama_launcher", *launcher_args,
+                *self.command,
                 env=self._env(), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE, start_new_session=True))
+                stderr=asyncio.subprocess.PIPE, start_new_session=True, **kwargs))
             self._spawn = spawn
             try:
                 proc = await asyncio.wait_for(asyncio.shield(spawn), max(.001, deadline - time.monotonic()))
@@ -485,6 +559,26 @@ class OwnedOllama:
             raise OllamaSupervisorError("owned orphan group disappeared without proof")
         return tuple(result)
 
+    def ownership_snapshot(self) -> OwnedOllamaSnapshot:
+        """Return a read-only current daemon/descendant ownership snapshot."""
+        if self._broker is not None:
+            return self._broker.ownership_snapshot()
+        self._assert_owned()
+        members = self._members(allow_live=True)
+        daemon = self._fence.identity if self._fence is not None else None
+        if daemon is None:
+            raise OllamaSupervisorError("Ollama ownership is unavailable")
+        supervisor = self.gpu_proof.expected_supervisor
+        if type(supervisor) is not ProcessIdentity or daemon == supervisor:
+            raise OllamaSupervisorError("Ollama ownership supervisor identity is invalid")
+        descendants = tuple(sorted((fence.identity for fence, _ in members
+                                    if fence.identity != daemon), key=lambda item: (item.pid, item.start_time)))
+        if (len({item.pid for item in descendants}) != len(descendants) or
+                any(item.pid in {daemon.pid, supervisor.pid} for item in descendants)):
+            raise OllamaSupervisorError("Ollama descendant identities are not unique")
+        self._assert_owned()
+        return OwnedOllamaSnapshot(supervisor, daemon, descendants)
+
     def _group_gone(self) -> bool:
         if self._fence is None:
             return False
@@ -577,6 +671,9 @@ class OwnedOllama:
                 continue
 
     async def close(self) -> None:
+        if self._broker is not None:
+            await self._broker.close()
+            return
         async with self._state:
             task = self._retain_owned_cleanup()
         cancelled = False
@@ -595,6 +692,8 @@ class OwnedOllama:
             raise asyncio.CancelledError
 
     async def alive(self) -> bool:
+        if self._broker is not None:
+            return await self._broker.alive()
         if self.process is None or self._output_failed is not None:
             return False
         try:

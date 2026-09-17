@@ -11,8 +11,9 @@ from .runtime import BootstrapRuntime, RuntimeOptions
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("config", type=Path)
+    parser = argparse.ArgumentParser(description="Serve the offline runtime: [serve] CONFIG")
+    parser.add_argument("command_or_config")
+    parser.add_argument("config", type=Path, nargs="?")
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--result-dir", type=Path, required=True)
     parser.add_argument("--host", default="127.0.0.1")
@@ -21,7 +22,15 @@ def main() -> None:
     parser.add_argument("--host-pid-namespace", action="store_true",
                         help="attest that /proc and NVML use the host PID namespace")
     args = parser.parse_args()
-    runtime = BootstrapRuntime(load_config(args.config), RuntimeOptions(
+    # Preserve the original ``bootstrap CONFIG`` form while accepting the
+    # explicit production ``bootstrap serve CONFIG`` form.
+    if args.config is None:
+        command, config = "serve", Path(args.command_or_config)
+    else:
+        command, config = args.command_or_config, args.config
+    if command != "serve":
+        parser.error("command must be serve")
+    runtime = BootstrapRuntime(load_config(config), RuntimeOptions(
         args.state_dir, args.result_dir, args.host, args.port,
         shutdown_grace_seconds=args.shutdown_grace_seconds,
         host_pid_namespace=args.host_pid_namespace))
@@ -49,3 +58,7 @@ def main() -> None:
             for value in (signal.SIGINT, signal.SIGTERM):
                 loop.remove_signal_handler(value)
     asyncio.run(serve())
+
+
+if __name__ == "__main__":
+    main()

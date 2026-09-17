@@ -94,10 +94,12 @@ are checked before JSON parsing.
 ## Deliberate non-goals and dependent issues
 
 No benchmark runner, throughput sweep, GPU execution, production profile,
-server integration, artifact-manifest producer, or scheduler/ResourceManager
-integration is included. The existing `CapacityProfile` contract does not yet
-carry benchmark metadata or distinguish draft/measured state; this module keeps
-that evidence at its storage boundary rather than changing the contract.
+artifact-manifest producer, or scheduler/ResourceManager measurement
+integration is included. The read-only profile-validation HTTP route is a
+server integration of exact lookup, not a benchmark or runtime admission
+integration. The existing `CapacityProfile` contract does not yet carry
+benchmark metadata or distinguish draft/measured state; this module keeps that
+evidence at its storage boundary rather than changing the contract.
 Shared contracts now validate strict sample numerics, immutable descriptors and
 model-specific context/bucket shapes. The registry adds measurement completeness,
 20% reserve and evidence-integrity requirements. Synthetic experimental profiles

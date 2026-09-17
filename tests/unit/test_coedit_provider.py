@@ -10,7 +10,9 @@ from services.llm.provisioning.artifacts import SPECS
 from services.llm.provisioning.volume import provision
 from services.llm.providers.coedit import CoEdITProvider
 from services.llm.providers.config import GPUProof
-from services.llm.providers.gpu import ProcessIdentity, ResidencyEvidence
+from services.llm.providers.gpu import (_ResidencyPending, GPUProofError,
+                                        GPUMemoryObservation, ProcessIdentity,
+                                        ResidencyEvidence)
 from services.llm.providers.python_config import PythonProviderConfig
 from services.llm.providers.coedit_batch import CoEdITBatcher
 from services.llm.queue.contracts import ModelId
@@ -61,6 +63,26 @@ class CoEdITProviderTests(unittest.IsolatedAsyncioTestCase):
         await provider.validate(accepted)
         wrong=CapacityProfile(ModelId.COEDIT,"GPU-test","0"*64,"0"*64,"runtime","adapter","other",1,1,1,0,(SampleMetadata(1,0,1,1,1,()),),bucket_identity="other")
         with self.assertRaises(ValueError): await provider.validate(wrong)
+
+    async def test_load_runs_cuda_readiness_after_load_and_fences_failure(self):
+        config = self.config("/tmp")
+        provider = CoEdITProvider(config)
+        calls = []
+        worker = AsyncMock()
+        async def call(operation, **values):
+            calls.append(operation)
+            if operation == "cuda_ready":
+                raise RuntimeError("CUDA readiness operation failed")
+            return True
+        worker.call.side_effect = call
+        with patch("services.llm.providers.coedit.PythonWorker", return_value=worker), \
+                patch.object(provider, "_artifact", return_value=Path("/offline")):
+            with self.assertRaises(RuntimeError): await provider.load(self.profile(config))
+        self.assertEqual(calls, ["load", "cuda_ready"])
+        worker.close.assert_awaited_once()
+        self.assertIsNone(provider.worker)
+        self.assertFalse(provider._ready)
+        self.assertTrue(await provider.verify_cleanup())
 
     async def test_opt_in_batch_profile_is_bound_to_exact_batch_bucket(self):
         config = self.config("/tmp")
@@ -182,6 +204,202 @@ class CoEdITProviderTests(unittest.IsolatedAsyncioTestCase):
         provider.worker=worker
         object.__setattr__(config.gpu_proof, "residency", AsyncMock(return_value=ResidencyEvidence("GPU-test",config.gpu_proof.expected_supervisor,(runner,))))
         await provider.ready(); self.assertTrue(provider._ready)
+
+    async def test_ready_uses_expected_child_residency_when_available(self):
+        config=self.config("/tmp"); provider=CoEdITProvider(config)
+        runner=ProcessIdentity(123,456)
+        worker=AsyncMock(); worker.child_identity=runner
+        worker.call.return_value={"gpu_uuid":"GPU-test","runner_pid":123,"runner_start_time":456,"cuda_nvml_agree":True}
+        provider.worker=worker
+        expected = AsyncMock(return_value=ResidencyEvidence("GPU-test", config.gpu_proof.expected_supervisor, (runner,)))
+        object.__setattr__(config.gpu_proof, "residency_for_runner", expected)
+        await provider.ready()
+        expected.assert_awaited_once_with(runner)
+
+    def _fallback_fixture(self, *, memory=None, calls=None):
+        config = self.config("/tmp")
+        provider = CoEdITProvider(config)
+        runner = ProcessIdentity(123, 456)
+        worker = AsyncMock()
+        worker.child_identity = runner
+        identity = {"gpu_uuid": "GPU-test", "runner_pid": 123,
+                    "runner_start_time": 456, "cuda_nvml_agree": True}
+        worker.call.side_effect = list(calls or [])
+        provider.worker = worker
+        object.__setattr__(config.gpu_proof, "residency_for_runner",
+                           AsyncMock(side_effect=_ResidencyPending("absent")))
+        baseline = GPUMemoryObservation("GPU-test", config.gpu_proof.expected_supervisor,
+                                        1, 2, 1000, 400, 600)
+        provider._preload_memory = baseline
+        object.__setattr__(config.gpu_proof, "memory", AsyncMock(side_effect=memory or (
+            GPUMemoryObservation("GPU-test", config.gpu_proof.expected_supervisor, 3, 4, 1000, 500, 500),
+            GPUMemoryObservation("GPU-test", config.gpu_proof.expected_supervisor, 5, 6, 1000, 501, 499))))
+        return provider, config, runner
+
+    async def test_coedit_fallback_accepts_ordered_samples_with_fluctuating_memory(self):
+        provider, config, runner = self._fallback_fixture(calls=[
+            {"gpu_uuid": "GPU-test", "runner_pid": 123, "runner_start_time": 456, "cuda_nvml_agree": True},
+            {"model_cuda_device": "cuda:0", "witness_exists": True, "witness_cuda_device": "cuda:0"},
+            {"gpu_uuid": "GPU-test", "runner_pid": 123, "runner_start_time": 456, "cuda_nvml_agree": True},
+            {"model_cuda_device": "cuda:0", "witness_exists": True, "witness_cuda_device": "cuda:0"},
+        ])
+        await provider._coedit_fallback(runner)
+        # Each proof sample is independently fenced: identity, retained CUDA
+        # witness, typed absence, and memory observation.
+        self.assertEqual(provider.worker.call.await_count, 4)
+
+    async def test_coedit_fallback_rejects_non_pending_or_invalid_evidence(self):
+        base_calls = [
+            {"gpu_uuid": "GPU-test", "runner_pid": 123, "runner_start_time": 456, "cuda_nvml_agree": True},
+            {"model_cuda_device": "cuda:0", "witness_exists": True, "witness_cuda_device": "cuda:0"},
+        ]
+        for mutation in ("residency", "witness", "identity", "memory"):
+            with self.subTest(mutation=mutation):
+                provider, config, runner = self._fallback_fixture(calls=base_calls)
+                if mutation == "residency":
+                    object.__setattr__(config.gpu_proof, "residency_for_runner",
+                                       AsyncMock(side_effect=GPUProofError("changed topology")))
+                elif mutation == "witness":
+                    provider.worker.call.side_effect = [base_calls[0], {"witness_exists": False}]
+                elif mutation == "identity":
+                    provider.worker.call.side_effect = [base_calls[0], base_calls[1],
+                        {"gpu_uuid": "GPU-test", "runner_pid": 999, "runner_start_time": 456, "cuda_nvml_agree": True}]
+                else:
+                    object.__setattr__(config.gpu_proof, "memory", AsyncMock(side_effect=[
+                        GPUMemoryObservation("GPU-test", config.gpu_proof.expected_supervisor, 3, 4, 1000, 400, 600),
+                        GPUMemoryObservation("GPU-test", config.gpu_proof.expected_supervisor, 5, 6, 1000, 401, 599)]))
+                with self.assertRaises((RuntimeError, GPUProofError)):
+                    await provider._coedit_fallback(runner)
+
+    async def test_coedit_fallback_cancellation_is_not_readiness_authority(self):
+        provider, config, runner = self._fallback_fixture(calls=[
+            {"gpu_uuid": "GPU-test", "runner_pid": 123, "runner_start_time": 456,
+             "cuda_nvml_agree": True},
+            {"model_cuda_device": "cuda:0", "witness_exists": True,
+             "witness_cuda_device": "cuda:0"},
+        ])
+        object.__setattr__(config.gpu_proof, "residency_for_runner",
+                           AsyncMock(side_effect=asyncio.CancelledError()))
+        with self.assertRaises(asyncio.CancelledError):
+            await provider._coedit_fallback(runner)
+        self.assertFalse(provider.accepted_model_specific_residency())
+
+    async def test_ready_falls_back_after_settlement_timeout_and_grants_model_authority(self):
+        config = self.config("/tmp")
+        provider = CoEdITProvider(config)
+        runner = ProcessIdentity(123, 456)
+        identity = {"gpu_uuid": "GPU-test", "runner_pid": 123,
+                    "runner_start_time": 456, "cuda_nvml_agree": True}
+        witness = {"model_cuda_device": "cuda:0", "witness_exists": True,
+                   "witness_cuda_device": "cuda:0"}
+        worker = AsyncMock()
+        worker.child_identity = runner
+        worker.call.side_effect = [identity, identity, witness, identity, witness]
+        provider.worker = worker
+        object.__setattr__(config.gpu_proof, "residency_for_runner",
+                           AsyncMock(side_effect=_ResidencyPending("absent")))
+        supervisor = config.gpu_proof.expected_supervisor
+        provider._preload_memory = GPUMemoryObservation(
+            "GPU-test", supervisor, 1, 2, 1000, 400, 600)
+        object.__setattr__(config.gpu_proof, "memory", AsyncMock(side_effect=(
+            GPUMemoryObservation("GPU-test", supervisor, 3, 4, 1000, 500, 500),
+            GPUMemoryObservation("GPU-test", supervisor, 5, 6, 1000, 501, 499))))
+        now = [0.0]
+        async def expire_settlement(delay):
+            now[0] += 5.0
+        provider._residency_clock = lambda: now[0]
+        provider._residency_sleep = expire_settlement
+
+        await provider.ready()
+
+        self.assertTrue(provider._ready)
+        self.assertTrue(provider._model_specific_ready)
+        self.assertTrue(provider.accepted_model_specific_residency())
+        self.assertEqual(
+            [call.args[0] for call in worker.call.await_args_list],
+            ["gpu_identity", "gpu_identity", "cuda_residency",
+             "gpu_identity", "cuda_residency"])
+
+    async def test_ready_fallback_failure_leaves_model_authority_fenced(self):
+        config = self.config("/tmp")
+        provider = CoEdITProvider(config)
+        runner = ProcessIdentity(123, 456)
+        identity = {"gpu_uuid": "GPU-test", "runner_pid": 123,
+                    "runner_start_time": 456, "cuda_nvml_agree": True}
+        foreign_identity = {"gpu_uuid": "GPU-test", "runner_pid": 999,
+                            "runner_start_time": 456, "cuda_nvml_agree": True}
+        witness = {"model_cuda_device": "cuda:0", "witness_exists": True,
+                   "witness_cuda_device": "cuda:0"}
+        worker = AsyncMock()
+        worker.child_identity = runner
+        worker.call.side_effect = [identity, identity, witness, foreign_identity]
+        provider.worker = worker
+        object.__setattr__(config.gpu_proof, "residency_for_runner",
+                           AsyncMock(side_effect=_ResidencyPending("absent")))
+        supervisor = config.gpu_proof.expected_supervisor
+        provider._preload_memory = GPUMemoryObservation(
+            "GPU-test", supervisor, 1, 2, 1000, 400, 600)
+        object.__setattr__(config.gpu_proof, "memory", AsyncMock(return_value=
+            GPUMemoryObservation("GPU-test", supervisor, 3, 4, 1000, 500, 500)))
+        now = [0.0]
+        async def expire_settlement(delay):
+            now[0] += 5.0
+        provider._residency_clock = lambda: now[0]
+        provider._residency_sleep = expire_settlement
+
+        with self.assertRaises(RuntimeError):
+            await provider.ready()
+
+        self.assertFalse(provider._ready)
+        self.assertFalse(provider._model_specific_ready)
+        self.assertFalse(provider.accepted_model_specific_residency())
+        self.assertEqual(
+            [call.args[0] for call in worker.call.await_args_list],
+            ["gpu_identity", "gpu_identity", "cuda_residency", "gpu_identity"])
+
+    async def test_ready_settles_empty_gpu_runner_but_never_grants_authority_on_persistent_or_uncertain_proof(self):
+        config=self.config("/tmp"); provider=CoEdITProvider(config)
+        runner=ProcessIdentity(123,456)
+        worker=AsyncMock(); worker.child_identity=runner
+        worker.call.return_value={"gpu_uuid":"GPU-test","runner_pid":123,"runner_start_time":456,"cuda_nvml_agree":True}
+        provider.worker=worker
+        now, calls = [0.0], [0]
+        async def sleep(delay): now[0] += delay
+        async def settles():
+            calls[0] += 1
+            if calls[0] < 3: raise _ResidencyPending("GPU has no resident runner")
+            return ResidencyEvidence("GPU-test",config.gpu_proof.expected_supervisor,(runner,))
+        object.__setattr__(config.gpu_proof, "residency", settles)
+        provider._residency_clock=lambda: now[0]; provider._residency_sleep=sleep
+        await provider.ready(); self.assertTrue(provider._ready)
+        provider._ready=False
+        async def persistent(): raise _ResidencyPending("GPU has no resident runner")
+        object.__setattr__(config.gpu_proof, "residency", persistent)
+        with self.assertRaises(GPUProofError): await provider.ready()
+        self.assertFalse(provider._ready)
+
+    async def test_ready_settlement_cancellation_propagates_without_session_authority(self):
+        config=self.config("/tmp"); provider=CoEdITProvider(config)
+        runner=ProcessIdentity(123,456)
+        worker=AsyncMock(); worker.child_identity=runner
+        worker.call.return_value={"gpu_uuid":"GPU-test","runner_pid":123,"runner_start_time":456,"cuda_nvml_agree":True}
+        provider.worker=worker
+        async def empty(): raise _ResidencyPending("GPU has no resident runner")
+        sleeping=asyncio.Event()
+        async def sleep(delay):
+            sleeping.set()
+            await asyncio.Event().wait()
+        object.__setattr__(config.gpu_proof, "residency", empty)
+        provider._residency_sleep=sleep
+        task=asyncio.create_task(provider.ready())
+        await sleeping.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError): await task
+        self.assertFalse(provider._ready)
+        async def uncertain(): raise GPUProofError("supervisor PID was reused or exited")
+        object.__setattr__(config.gpu_proof, "residency", uncertain)
+        with self.assertRaises(GPUProofError): await provider.ready()
+        self.assertFalse(provider._ready)
 
     async def test_failed_cleanup_retains_provider_worker(self):
         provider=CoEdITProvider(self.config("/tmp")); worker=AsyncMock(); worker.close.side_effect=RuntimeError("uncertain")

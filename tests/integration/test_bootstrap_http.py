@@ -61,6 +61,8 @@ class FakeCapture:
     def __call__(self, gpu_uuid, supervisor_pid, *, host_pid_namespace):
         class Proof:
             supervisor_identity = ProcessIdentity(supervisor_pid, 1)
+            residency_for_runner = None
+            memory = None
             async def identity(self): return gpu_uuid
             async def cleanup(self): return True
             async def residency(self): raise AssertionError("fake provider must not ask residency")

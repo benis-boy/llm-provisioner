@@ -1,10 +1,11 @@
 """Offline CoEdIT adapter using one bounded child worker per load."""
 from __future__ import annotations
-import asyncio, json
+import asyncio, inspect, json, time
 from services.llm.provisioning.volume import verify_current
 from services.llm.provisioning.artifacts import SPECS
 from services.llm.resource_manager.contracts import CapacityProfile
-from .gpu import ProcessIdentity, ResidencyEvidence
+from .gpu import (GPUMemoryObservation, ProcessIdentity, ResidencyEvidence,
+                  _ResidencyPending, settle_residency)
 from services.llm.queue.contracts import ModelId
 from services.llm.resource_manager.protocol import ProviderResponse
 from .python_process import PythonWorker
@@ -15,10 +16,14 @@ class CoEdITProvider:
         self.worker = None
         self.profile = None
         self._ready = False
+        self._model_specific_ready = False
+        self._preload_memory = None
         self._cleanup = True
         self._batcher = None
         self._last_batch_observation = None
         self._cleanup_task = None
+        self._residency_sleep = asyncio.sleep
+        self._residency_clock = time.monotonic
     def _artifact(self):
         evidence = verify_current(self.config.artifact_root)
         if evidence.get("manifestSha256") != self.config.manifest_sha256:
@@ -43,10 +48,18 @@ class CoEdITProvider:
             raise ValueError("unsupported CoEdIT profile")
         self.profile=profile
     async def load(self,profile):
+        self._ready = False
+        self._model_specific_ready = False
         await self.validate(profile); root=await asyncio.to_thread(self._artifact); self._cleanup=False
+        self._preload_memory = await self._memory() if self.config.gpu_proof.memory is not None else None
         if self.worker is not None: raise RuntimeError("previous CoEdIT worker has not been cleaned up")
         self.worker=PythonWorker(root,{"dtype":self.config.dtype,"gpu_uuid":self.config.gpu_uuid,"max_input_tokens":self.config.max_input_tokens,"max_output_tokens":self.config.max_output_tokens,"generation_parameters":dict(self.config.generation_parameters),"max_native_batch_size":self.config.max_native_batch_size,"rpc_frame_limit":self.config.rpc_frame_limit,"cuda_timing":True},timeout=self.config.request_timeout_seconds,frame_limit=self.config.rpc_frame_limit,gpu_proof=self.config.gpu_proof)
-        try: await self.worker.start(); await self.worker.call("load")
+        try:
+            await self.worker.start()
+            await self.worker.call("load")
+            # Loading alone may not create an NVML compute-process record.
+            # Synchronize a deterministic, input-free CUDA witness first.
+            await self.worker.call("cuda_ready")
         except BaseException:
             await self.worker.close()
             self.worker = None
@@ -56,15 +69,108 @@ class CoEdITProvider:
             self.config.native_batch_delay_seconds, self.config.max_output_tokens)
     async def ready(self):
         self._ready = False
+        self._model_specific_ready = False
         if self.worker is None: raise RuntimeError("provider is not loaded")
         value=await self.worker.call("gpu_identity")
         if not isinstance(value,dict) or set(value)!={"gpu_uuid","runner_pid","runner_start_time","cuda_nvml_agree"} or value.get("gpu_uuid")!=self.config.gpu_uuid or value.get("cuda_nvml_agree") is not True: raise RuntimeError("CUDA/NVML GPU identity mismatch")
         if self.config.gpu_proof is None or self.worker.child_identity is None: raise RuntimeError("GPU ownership proof is required")
-        evidence=await self.config.gpu_proof.residency()
-        expected=self.config.gpu_proof.expected_supervisor
         runner=ProcessIdentity(value["runner_pid"],value["runner_start_time"])
-        if type(evidence) is not ResidencyEvidence or evidence.gpu_uuid!=self.config.gpu_uuid or evidence.supervisor!=expected or runner!=self.worker.child_identity or runner not in evidence.runners: raise RuntimeError("worker is not a proved GPU runner")
+        if runner != self.worker.child_identity: raise RuntimeError("worker GPU identity does not match child identity")
+        proof = self.config.gpu_proof
+        probe = proof.residency_for_runner or proof.residency
+        if probe is None: raise RuntimeError("GPU expected-runner residency proof is required")
+        try:
+            evidence=await settle_residency(lambda: probe(runner) if proof.residency_for_runner else probe(),
+                sleep=self._residency_sleep, monotonic=self._residency_clock)
+            self._validate_residency(evidence, runner)
+        except _ResidencyPending:
+            if proof.residency_for_runner is None or proof.memory is None:
+                raise
+            await self._coedit_fallback(runner)
         self._ready=True
+        self._model_specific_ready=True
+
+    async def _memory(self):
+        value = self.config.gpu_proof.memory()
+        if inspect.isawaitable(value):
+            value = await value
+        self._validate_memory_observation(value)
+        return value
+
+    def _validate_memory_observation(self, value):
+        if type(value) is not GPUMemoryObservation:
+            raise RuntimeError("GPU memory proof is invalid")
+        expected = self.config.gpu_proof.expected_supervisor
+        fields = (value.start_ns, value.end_ns, value.total_bytes, value.used_bytes, value.free_bytes)
+        if (value.gpu_uuid != self.config.gpu_uuid or value.supervisor != expected or
+                any(type(item) is not int for item in fields) or value.start_ns > value.end_ns or
+                value.total_bytes <= 0 or value.used_bytes < 0 or value.free_bytes < 0 or
+                value.used_bytes > value.total_bytes or value.free_bytes > value.total_bytes or
+                value.used_bytes + value.free_bytes > value.total_bytes):
+            raise RuntimeError("GPU memory proof is malformed or changed")
+
+    def _validate_residency(self, value, runner):
+        expected = self.config.gpu_proof.expected_supervisor
+        if (type(value) is not ResidencyEvidence or value.gpu_uuid != self.config.gpu_uuid or
+                value.supervisor != expected or runner != self.worker.child_identity or
+                runner not in value.runners or len(value.runners) != 1):
+            raise RuntimeError("worker is not a proved GPU runner")
+
+    async def _coedit_fallback(self, runner):
+        """Use only the bounded CoEdIT composition when NVML has no child PID."""
+        proof = self.config.gpu_proof
+        expected = proof.expected_supervisor
+        pre = self._preload_memory
+        if type(pre) is not GPUMemoryObservation or pre.supervisor != expected:
+            raise RuntimeError("CoEdIT fallback baseline memory proof is unavailable")
+        self._validate_memory_observation(pre)
+        async def sample():
+            identity = await self.worker.call("gpu_identity")
+            self._validate_child_identity(identity, runner)
+            witness = await self.worker.call("cuda_residency")
+            if (type(witness) is not dict or set(witness) != {"model_cuda_device","witness_exists","witness_cuda_device"}
+                    or witness != {"model_cuda_device":"cuda:0","witness_exists":True,"witness_cuda_device":"cuda:0"}):
+                raise RuntimeError("CoEdIT CUDA witness is invalid")
+            # This call is the public ancestry/device fence; its pending result is
+            # expected here, while every other proof error remains terminal.
+            try:
+                pending = proof.residency_for_runner(runner)
+                if inspect.isawaitable(pending):
+                    pending = await pending
+            except _ResidencyPending:
+                # Absence is the only reason to use this model-specific path.
+                # In particular, do not turn a malformed or newly positive
+                # topology result into memory-based ownership.
+                pass
+            else:
+                raise RuntimeError("CoEdIT fallback expected typed pending residency")
+            post = await self._memory()
+            if (post.total_bytes != pre.total_bytes or post.gpu_uuid != pre.gpu_uuid or
+                    post.supervisor != expected or post.used_bytes <= pre.used_bytes):
+                raise RuntimeError("CoEdIT GPU memory residency effect is invalid")
+            return post
+        first = await sample()
+        second = await sample()
+        # Samples are points, not snapshots.  Allocator/NVML readings may
+        # fluctuate; only the immutable device/fence identity must remain
+        # stable, and each point has already been independently validated.
+        if ((first.gpu_uuid, first.supervisor, first.total_bytes) !=
+                (second.gpu_uuid, second.supervisor, second.total_bytes)):
+            raise RuntimeError("CoEdIT fallback observation identity changed")
+
+    def _validate_child_identity(self, value, runner):
+        try:
+            identity = ProcessIdentity(value["runner_pid"], value["runner_start_time"])
+        except (KeyError, TypeError):
+            identity = None
+        if (not isinstance(value, dict) or set(value) != {"gpu_uuid","runner_pid","runner_start_time","cuda_nvml_agree"}
+                or type(value.get("runner_pid")) is not int or type(value.get("runner_start_time")) is not int
+                or value.get("gpu_uuid") != self.config.gpu_uuid or value.get("cuda_nvml_agree") is not True
+                or identity != runner or self.worker.child_identity != runner):
+            raise RuntimeError("worker GPU identity does not match child identity")
+
+    def accepted_model_specific_residency(self) -> bool:
+        return self._model_specific_ready
     @staticmethod
     def _decode_input(payload):
         """Decode the immutable request envelope without doing model work.
@@ -141,5 +247,7 @@ class CoEdITProvider:
             self.worker=self.profile=self._batcher=None
             self._last_batch_observation=None
             self._ready=False
+            self._model_specific_ready=False
+            self._preload_memory=None
             self._cleanup=True
     async def verify_cleanup(self): return self._cleanup and self.worker is None

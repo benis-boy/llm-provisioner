@@ -14,6 +14,8 @@ from services.llm.providers.gpu import ProcessIdentity
 class _LinuxProof:
     def __init__(self):
         self.supervisor_identity = ProcessIdentity(os.getpid(), 1)
+        self.residency_for_runner = self._residency_for_runner
+        self.memory = None
 
     async def identity(self):
         return "GPU-test"
@@ -23,6 +25,9 @@ class _LinuxProof:
 
     async def residency(self):
         raise AssertionError("health must not make a provider resident")
+
+    async def _residency_for_runner(self, runner):
+        raise AssertionError("test proof callback must not be invoked here")
 
 
 class RuntimeOptionsTests(unittest.TestCase):
@@ -45,5 +50,6 @@ class RuntimeProofTests(unittest.IsolatedAsyncioTestCase):
         typed = runtime._typed_proof()
         self.assertIs(type(typed), GPUProof)
         self.assertEqual(typed.expected_supervisor, runtime.proof.supervisor_identity)
+        self.assertIs(typed.residency_for_runner, runtime.proof.residency_for_runner)
         self.assertEqual(await typed.identity(), "GPU-test")
         self.assertTrue(await typed.cleanup())

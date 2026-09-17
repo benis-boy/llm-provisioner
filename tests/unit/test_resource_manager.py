@@ -2,6 +2,7 @@
 
 import asyncio
 import unittest
+from collections import deque
 
 from services.llm.queue.contracts import ModelId
 from services.llm.resource_manager.contracts import CapacityProfile, SampleMetadata
@@ -21,6 +22,8 @@ class FakeProvider:
         self.release = asyncio.Event(); self.started = asyncio.Event(); self.calls = []
         self.ignore_cancel = False; self.raise_cancelled = False; self.cleanup_ok = True
         self.validation_gate = None; self.validation_started = asyncio.Event()
+        self.validation_gates = deque(); self.validation_payload_started = {}
+        self.validation_count = 0; self.second_validation_started = asyncio.Event()
         self.cancel_gate = asyncio.Event()
 
     async def validate(self, profile): pass
@@ -28,6 +31,10 @@ class FakeProvider:
     async def ready(self): pass
     async def validate_input(self, payload, *, context_size, bucket_identity):
         self.validation_started.set()
+        self.validation_count += 1
+        if self.validation_count >= 2: self.second_validation_started.set()
+        self.validation_payload_started.setdefault(payload, asyncio.Event()).set()
+        if self.validation_gates: await self.validation_gates.popleft().wait()
         if self.validation_gate: await self.validation_gate.wait()
         if payload == b"bad": raise ValueError("bad")
     async def execute(self, request_id, payload):
@@ -183,6 +190,118 @@ class ResourceManagerTests(unittest.IsolatedAsyncioTestCase):
         a = asyncio.create_task(self.submit("r", "a", key="one")); await self.provider.validation_started.wait()
         b = asyncio.create_task(self.submit("r", "a", key="two")); await asyncio.sleep(0)
         self.provider.validation_gate.set(); self.assertEqual((await a).attempt, (await b).attempt)
+
+    async def test_replay_does_not_leave_validation_reservation(self):
+        """A replay after an active admission must remain a plain replay."""
+        await self.submit("r", "a", key="one")
+        await asyncio.sleep(0)
+        self.assertEqual(await self.rm.submit(self.session.session_token, "r", "a", b"x",
+                                              idempotency_key="two", context_size=128),
+                         await self.submit("r", "a", key="one"))
+        self.assertNotIn("r", self.rm._validating[self.session.session_token])
+        self.assertTrue(await self.rm.cancel_request(self.session.session_token, "r", idempotency_key="cancel-replay"))
+
+    async def test_concurrent_same_attempt_validation_keeps_cancellation_fenced(self):
+        self.provider.validation_gate = asyncio.Event()
+        first = asyncio.create_task(self.submit("r", "a", key="one"))
+        await self.provider.validation_started.wait()
+        second = asyncio.create_task(self.submit("r", "a", key="two"))
+        await asyncio.sleep(0)
+        self.assertTrue(await self.rm.cancel_request(self.session.session_token, "r", idempotency_key="cancel-race"))
+        self.provider.validation_gate.set()
+        results = await asyncio.gather(first, second, return_exceptions=True)
+        self.assertTrue(all(isinstance(result, ResourceManagerError) for result in results))
+        self.assertTrue(all(result.failure.code == "request_cancelled" for result in results))
+        self.assertNotIn("r", self.rm._validating[self.session.session_token])
+
+    async def test_conflicting_duplicate_validator_cannot_replace_marker(self):
+        self.provider.validation_gate = asyncio.Event()
+        first = asyncio.create_task(self.submit("r", "a", b"one", "one"))
+        await self.provider.validation_started.wait()
+        with self.assertRaises(ResourceManagerError) as conflict:
+            await self.submit("r", "a", b"two", "two")
+        self.assertEqual(conflict.exception.failure.code, "idempotency_conflict")
+        marker = self.rm._validating[self.session.session_token]["r"]
+        self.assertEqual(marker[:2], ("a", self.rm._identity("r", "a", b"one", 128, None)))
+        self.provider.validation_gate.set()
+        self.assertTrue((await first).accepted)
+        self.assertNotIn("r", self.rm._validating[self.session.session_token])
+
+    async def test_failed_duplicate_validator_preserves_survivor_reservation_for_cancel(self):
+        first_gate, second_gate = asyncio.Event(), asyncio.Event()
+        validation_number = 0
+
+        async def validate_input(payload, *, context_size, bucket_identity):
+            nonlocal validation_number
+            validation_number += 1
+            call_number = validation_number
+            self.provider.validation_started.set()
+            if call_number == 2:
+                self.provider.second_validation_started.set()
+            await (first_gate if call_number == 1 else second_gate).wait()
+            if call_number == 1:
+                raise ValueError("first validator failed")
+
+        self.provider.validate_input = validate_input
+        first = asyncio.create_task(self.submit("r", "a", b"x", "one"))
+        await self.provider.validation_started.wait()
+        second = asyncio.create_task(self.submit("r", "a", b"x", "two"))
+        await self.provider.second_validation_started.wait()
+
+        # Both validators have the same immutable identity.  The first fails
+        # during validation; its once-only release must leave the survivor's
+        # reservation in place while the second validator remains blocked.
+        first_gate.set()
+        with self.assertRaises(ResourceManagerError) as rejected_first:
+            await first
+        self.assertEqual(rejected_first.exception.failure.code, "invalid_input")
+        marker = self.rm._validating[self.session.session_token]["r"]
+        self.assertEqual(marker[2], 1)
+
+        self.assertTrue(await self.rm.cancel_request(self.session.session_token, "r", idempotency_key="cancel-survivor"))
+        second_gate.set()
+        with self.assertRaises(ResourceManagerError) as rejected_second:
+            await second
+        self.assertEqual(rejected_second.exception.failure.code, "request_cancelled")
+        self.assertNotIn("r", self.rm._validating[self.session.session_token])
+        self.assertFalse(any(call[0] == "execute" for call in self.provider.calls if isinstance(call, tuple)))
+
+    async def test_cancelled_wait_for_final_admission_releases_reservation(self):
+        gate = asyncio.Event()
+        self.provider.validation_gates = deque((gate,))
+        submit = asyncio.create_task(self.submit("r", "a"))
+        await self.provider.validation_started.wait()
+        await self.rm._lock.acquire()
+        gate.set()
+        await asyncio.sleep(0)
+        self.rm._lock.release()
+        submit.cancel()
+        with self.assertRaises(asyncio.CancelledError): await submit
+        self.assertNotIn("r", self.rm._validating[self.session.session_token])
+
+    async def test_cancel_validation_and_active_work_fences_late_result_and_calls_provider(self):
+        first_gate, second_gate = asyncio.Event(), asyncio.Event()
+        self.provider.validation_gates = deque((first_gate, second_gate))
+        first = asyncio.create_task(self.submit("r", "a", b"one", "one"))
+        await self.provider.validation_started.wait()
+        second = asyncio.create_task(self.submit("r", "a", b"one", "two"))
+        await asyncio.sleep(0)
+        first_gate.set()
+        await first
+        await self.provider.started.wait()
+        await self.provider.second_validation_started.wait()
+        self.assertTrue(await self.rm.cancel_request(self.session.session_token, "r", idempotency_key="cancel-race"))
+        self.assertIn(("cancel", "r"), self.provider.calls)
+        second_gate.set()
+        with self.assertRaises(ResourceManagerError) as rejected:
+            await second
+        self.assertEqual(rejected.exception.failure.code, "request_cancelled")
+        self.provider.release.set()
+        await asyncio.sleep(.01)
+        events = [event for event in self.rm._events[self.session.session_token]
+                  if event.kind is EventKind.RESPONSE_FINISHED]
+        self.assertEqual(len(events), 1)
+        self.assertEqual((events[0].request_id, events[0].attempt, events[0].result), ("r", "a", None))
 
     async def test_session_fence_during_validation(self):
         self.provider.validation_gate = asyncio.Event(); task = asyncio.create_task(self.submit("r", "a")); await self.provider.validation_started.wait()

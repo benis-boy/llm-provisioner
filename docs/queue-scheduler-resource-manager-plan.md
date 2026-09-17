@@ -27,23 +27,20 @@ capacity notes are not implementation evidence.
 
 ### Current/open status and evidence ledger (2026-09-17)
 
-Phase 2 is complete against its implementation and local acceptance exit;
-other phases remain open. Phase completion does not promote a product goal to
+Phases 0, 2, 3 and 4 are complete against their respective contract, local
+acceptance and candidate exits; Phases 1, 5 and 6 remain open. Phase completion does not promote a product goal to
 `done` without its required production-boundary proof. See
 [implementation decisions](implementation-decisions.md) and
 [queue-core boundaries](queue-core.md).
 
 The bounded implementation and local-verification record is maintained in the
 [partial-completed evidence ledger](queue-scheduler-resource-manager-plan-partial_completed.md).
-It records the Phase 2 completion and other bounded slices: G0 and G1–G4 remain
+It records phase completions and other bounded slices: G0 and G1–G4 remain
 `partial`, and no qualifying production-boundary E2E exists.
 
-- [ ] **Phase 0 exit:** fully validate OpenAPI and client/server bindings; finish
-  profile runtime integration after compatibility review. Durable profile SQLite
-  storage and strict selected-artifact manifests now exist as precursor slices.
-  Parsed OpenAPI validation and RM/scheduler loopback binding tests now pass;
-  future capacity-measurement and health operations retain
-  their full target contracts.
+- [x] **Phase 0 — Resolve contracts:** decision ownership, transition/invariant
+  review, typed schemas and validated handwritten HTTP bindings verified.
+  [Acceptance evidence](queue-scheduler-resource-manager-plan-partial_completed.md#phase-0-complete--contracts-and-validated-bindings).
 - [ ] **Phase 1 — Compatibility spike and production image:** Docker/NVIDIA and
   candidate three-model offline small and configured upper-fixture inference,
   RM cancellation fencing and process cleanup passed with verified selected
@@ -53,19 +50,26 @@ It records the Phase 2 completion and other bounded slices: G0 and G1–G4 remai
 - [x] **Phase 2 — Durable queue core:** persistence, ordering, recovery,
   RM HTTP session replacement/outbox replay and guarded operations verified.
   [Acceptance evidence](queue-scheduler-resource-manager-plan-partial_completed.md#phase-2-complete--durable-queue-core).
-- [ ] **Phase 3 — Async QueueScheduler:** coordinator, dispatch replay, watch,
-  completion watchdog, cancellation and crash publication recovery implemented
-  locally. Review-driven race fixes passed local verification; production-boundary
-  integration and complete transition/insertion coverage remain open.
-- [ ] **ResourceManager precursor:** typed in-process protocol and fake-provider
-  lifecycle, exclusive residency fences, p+p admission, bounded cleanup and event
-  replay implemented. Real experimental RM-driven lifecycle harness passed;
-   RM HTTP binding has local loopback proof; full production adapter integration remains open.
-- [ ] **Phase 4 — ResourceManager and real adapters.**
+- [x] **Phase 3 — Async QueueScheduler:** deterministic lifecycle, cancellation,
+  retry, watchdog and insertion/eligibility acceptance verified.
+  [Acceptance evidence](queue-scheduler-resource-manager-plan-partial_completed.md#phase-3-complete--queuescheduler-behavior).
+- [x] **Phase 4 — ResourceManager and real adapters:** implementation, focused
+  regression, the complete local acceptance exit, and the exact offline
+  three-model GPU candidate pass. The former ResourceManager precursor is
+  consolidated into this phase's [evidence record](queue-scheduler-resource-manager-plan-partial_completed.md#phase-4-continuation--local-exit-and-exact-gpu-candidate-complete).
 - [ ] **Phase 5 — Offline provisioner and measured capacity profiles.**
 - [ ] **Phase 6 — Production E2E, observability, deployment and runbooks.**
 
-Latest continuation: a candidate real QueueScheduler → ResourceManager → CoEdIT
+Latest continuation closes Phase 0 with **145 task-related tests** and two
+additional **10-test** acceptance runs, warnings treated as errors. Actual
+loopback response/schema checks cover scheduler SSE, RM backpressure, artifact
+and profile validation, and health. Compilation and whitespace checks pass.
+The [decision record](implementation-decisions.md) separates settled contract
+policy from later production evidence: approved compatibility pins (Phase 1),
+measured provisioning (Phase 5), and backup/deployment/E2E (Phase 6). No future
+operation or production goal is claimed complete.
+
+Earlier candidate evidence: a real QueueScheduler → ResourceManager → CoEdIT
 check now passes offline, both as root and UID/GID 65534. It verifies accepted
 pre-dispatch SQLite close/reopen, exact durable result/receipt identity, and a
 completed late delegate response fenced from cancelled publication. This is not
@@ -741,18 +745,15 @@ proof. Use the target GPU, host driver, and NVIDIA Container Toolkit.
 
 ## 8. Implementation phases and exit criteria
 
-### Phase 0 — Resolve contracts
+### Phase 0 — Resolve contracts — complete
 
-- Select optional-function polling/progress granularity and finalize the local
-  result-handoff plug-in details. Provider watchdog progress is already fixed as
-  completed provider responses only.
-- Write OpenAPI YAML first, before server or client implementation. Then add
-  generated or validated client/server bindings, typed persistence schemas, the
-  documented transition table,
-  optional-function descriptor, provisioner configuration, SQLite profile
-  schema, and exact model artifact manifests.
-- Exit: transition/invariant review passes and every ambiguity in section 11 has
-  an owner and decision.
+Contract decisions and transition/invariant review are recorded with canonical
+source authorities. Parsed OpenAPI, typed persistence/provisioning/profile
+schemas, selected manifests and validated handwritten HTTP bindings satisfy the
+contract exit. **145 focused tests pass**, with two additional **10-test**
+acceptance runs. Requirements, decision dispositions and later-phase evidence
+gates are consolidated in the
+[completion record](queue-scheduler-resource-manager-plan-partial_completed.md#phase-0-complete--contracts-and-validated-bindings).
 
 ### Phase 1 — Compatibility spike and image skeleton
 
@@ -771,26 +772,41 @@ eight-test acceptance suite also passed three repeated runs. Requirements,
 coverage and remaining production-proof limits are consolidated in the
 [completion record](queue-scheduler-resource-manager-plan-partial_completed.md#phase-2-complete--durable-queue-core).
 
-### Phase 3 — QueueScheduler behavior
+### Phase 3 — QueueScheduler behavior — complete
 
-- Implement model scoping, eligibility scans, registered ready/template
-  functions, status/timing events, duplicate no-ops, retry classification,
-  all-status cancellation, `stop()`, supersession, and idle abort-all.
-- Exit: deterministic scheduler tests cover every transition and insertion/
-  eligibility interaction.
+Deterministic scheduler acceptance plus independent transition, ordering and
+recovery guards satisfy the local phase exit. **150 task-related tests pass**;
+the 14-test acceptance module also passed three repeated runs. Coverage, fixes
+and production-proof limits are consolidated in the
+[completion record](queue-scheduler-resource-manager-plan-partial_completed.md#phase-3-complete--queuescheduler-behavior).
 
-### Phase 4 — ResourceManager and adapters
+### Phase 4 — ResourceManager and adapters — local and candidate exit complete
 
-- Implement server protocol, session/attempt fencing,
-  `optimal_parallelism + m` admission, and the three real adapters with
-  cancellation and cleanup fencing.
-- CoEdIT admission now performs bounded local envelope/bucket checks rather than
-  serializing tokenizer RPCs before native batching. The child still validates
-  every exact batch item before model execution; only its typed request rejection
-  is recoverable, while uncertain worker errors fail closed. This leaves the
-  fixed 5 ms batching policy, admission limits, and default p=1 unchanged.
-- Exit: local integration tests prove stale-generation rejection, bounded
-  backpressure, and adapter lifecycle behavior.
+Server protocol, session/attempt fences, p+p admission and all three adapter
+implementations have the completed local acceptance evidence, followed by a
+post-residency-fix focused run of **127 passing tests**. The local
+acceptance exercises actual adapter orchestration with synthetic external seams,
+p=2 plus two buffered requests, same-key replay/backpressure retry and stale
+controls during replacement. Validation reservations are identity-bound and
+released exactly once; cancellation fences overlapping validation and execution
+without hiding a late finished response. Details are consolidated in the
+[Phase 4 evidence record](queue-scheduler-resource-manager-plan-partial_completed.md#phase-4-continuation--local-exit-and-exact-gpu-candidate-complete).
+
+The local exit is complete: composed acceptance now proves failed replacement
+cleanup rejects every retired control and grants no replacement authority, and
+an actual local adapter's late completion after cancellation cannot expose a
+result. Local integration also proves stale-generation rejection, bounded
+backpressure, and adapter lifecycle behavior.
+
+The exact offline candidate now completes all four loads and three replacements.
+On the tested GPU/runtime, NVML can omit an owned Python CUDA worker while still
+exposing foreign/baseline and unreadable graphics IDs. CoEdIT and GECToR therefore
+use the bounded model-specific contract described above only after exact-runner
+proof remains typed-pending; those unrelated IDs never become ownership or
+cleanup authority. The candidate also proves cancellation/stale-session fences
+and final owned cleanup. Production deployment, measured capacity, scheduler-to-
+GPU deployment E2E, and approved production image/runtime inputs remain Phase
+1/5/6 work; no product goal is promoted to done.
 
 ### Phase 5 — Offline provisioning
 
@@ -864,31 +880,17 @@ tests/integration/
 tests/e2e/
 ```
 
-## 11. Decision ownership and remaining confirmation
+## 11. Decision ownership and later evidence gates
 
-1. Backup policy and durable request/result retention for the v1 SQLite state
-   volume. Its deployment location is settled as Docker named volume
-   `llm-provider-state`; no host path is configured.
-2. Settled: asynchronous HTTP/1.1 JSON with resumable SSE, as specified in section
-   5. Authentication/authorization are out of scope for trusted v1 deployment.
-   Platform implementation owns remaining validated bindings.
-3. Settled: consumer-registered Python sync/async functions; descriptors contain
-   a name, JSON-compatible arguments and dependency result IDs. Application
-     implementation owns runtime execution; durable descriptor integration is
-     implemented in Slice E and fenced evaluation in Slice F.
-4. Settled: `publish(request_id, attempt_token, result_reference, idempotency_key)`;
-   local publication durably acknowledges verified content-addressed bytes.
-   External publishers own duplicate-key no-ops; queue implementation owns delivery.
-5. Settled: configurable optional-function polling, default one second.
-6. Exact target GPU/container runtime and pinned Ollama, CUDA, PyTorch,
-   Transformers, and gector versions.
-7. Hash/provenance for the supplied GECToR `verb-form-vocab.txt` and
-   representative configured benchmark requests where generation cannot
-   preserve validity. Licensing is explicitly out of scope.
-8. Settled: content-addressed model volume, as specified in section 6.2. Operations
-   owns the remaining image registry and SBOM/signing policy.
+All eight contract decisions and owners are maintained once in the
+[decision record](implementation-decisions.md#settled-decisions-and-later-evidence-gates-from-plan-section-11).
+Phase 0 closure does not waive these remaining acceptance inputs:
 
-Operations owns decisions 1 and 6; provisioning owns decision 7. Resolution
-criteria and the conservative no-automatic-deletion default are recorded in
-[implementation decisions](implementation-decisions.md). The target compatibility
-matrix must be demonstrated before production adapters or pins are accepted.
+- **Phase 1 / operations:** demonstrate the complete target compatibility matrix
+  before approving exact GPU/runtime pins and production adapter acceptance.
+- **Phases 1/5 / provisioning:** retain verified selected-file provenance,
+  including GECToR vocabulary, maximum valid benchmark inputs and real measured
+  profiles. Candidate observations cannot be promoted to measured capacity.
+- **Phase 6 / operations:** supply backup/retention and registry/SBOM/signing
+  policy plus deployment proof. Durable requests/results default to no automatic
+  deletion; the named-volume layout remains fixed and licensing remains out of scope.

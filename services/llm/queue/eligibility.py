@@ -28,6 +28,11 @@ class EligibilityEvaluator:
     def invalidate(self):
         self._invalidated += 1
 
+    @property
+    def invalidation_epoch(self) -> int:
+        """Monotonic local invalidation identity for scheduler cache fencing."""
+        return self._invalidated
+
     async def _call(self, descriptor: FunctionDescriptor, deps: dict[str, str]):
         try: function = self.registry.resolve(descriptor.name)
         except LookupError as exc: raise RuntimeError("function_unavailable") from exc

@@ -1,12 +1,13 @@
 """Offline GECToR provider using the common owned Python worker transport."""
 from __future__ import annotations
-import asyncio, json, math
+import asyncio, inspect, json, math, time
 from services.llm.provisioning.volume import verify_current
 from services.llm.provisioning.artifacts import SPECS
 from services.llm.resource_manager.contracts import CapacityProfile
 from services.llm.queue.contracts import ModelId
 from services.llm.resource_manager.protocol import ProviderResponse
-from .gpu import ProcessIdentity, ResidencyEvidence
+from .gpu import (GPUMemoryObservation, ProcessIdentity, ResidencyEvidence,
+                  _ResidencyPending, settle_residency)
 from .python_process import PythonWorker
 from .gector_config import GECToRProviderConfig
 
@@ -16,6 +17,10 @@ class GECToRProvider:
         self.config, self.worker, self.profile = config, None, None
         self._ready = False
         self._cleanup = True
+        self._preload_memory = None
+        self._model_specific_ready = False
+        self._residency_sleep = asyncio.sleep
+        self._residency_clock = time.monotonic
 
     def _artifact(self):
         evidence = verify_current(self.config.artifact_root)
@@ -43,11 +48,16 @@ class GECToRProvider:
         self.profile = profile
 
     async def load(self, profile):
+        self._ready = False
+        self._model_specific_ready = False
+        self._preload_memory = None
         await self.validate(profile)
         root = await asyncio.to_thread(self._artifact)
         if self.worker is not None:
             raise RuntimeError("previous GECToR worker has not been cleaned up")
         self._cleanup = False
+        if self.config.gpu_proof is not None and self.config.gpu_proof.memory is not None:
+            self._preload_memory = await self._memory()
         self.worker = PythonWorker(root, {"dtype": self.config.dtype, "gpu_uuid": self.config.gpu_uuid,
             "max_subword_tokens": self.config.max_subword_tokens, "keep_confidence": self.config.keep_confidence,
             "min_error_prob": self.config.min_error_prob, "max_iterations": self.config.max_iterations,
@@ -55,20 +65,101 @@ class GECToRProvider:
             timeout=self.config.request_timeout_seconds, frame_limit=self.config.rpc_frame_limit, gpu_proof=self.config.gpu_proof)
         try:
             await self.worker.start(); await self.worker.call("load")
+            await self.worker.call("cuda_ready")
         except BaseException:
-            await self.worker.close(); raise
+            await self.worker.close()
+            self.worker = None
+            self._cleanup = True
+            raise
 
     async def ready(self):
         self._ready = False
+        self._model_specific_ready = False
         if self.worker is None: raise RuntimeError("provider is not loaded")
         value = await self.worker.call("gpu_identity")
         if not isinstance(value, dict) or set(value) != {"gpu_uuid", "runner_pid", "runner_start_time", "cuda_nvml_agree"} or value.get("gpu_uuid") != self.config.gpu_uuid or value.get("cuda_nvml_agree") is not True:
             raise RuntimeError("CUDA/NVML GPU identity mismatch")
         if self.config.gpu_proof is None or self.worker.child_identity is None: raise RuntimeError("GPU ownership proof is required")
-        evidence = await self.config.gpu_proof.residency(); runner = ProcessIdentity(value["runner_pid"], value["runner_start_time"])
-        if type(evidence) is not ResidencyEvidence or evidence.gpu_uuid != self.config.gpu_uuid or evidence.supervisor != self.config.gpu_proof.expected_supervisor or runner != self.worker.child_identity or runner not in evidence.runners:
-            raise RuntimeError("worker is not a proved GPU runner")
+        runner = ProcessIdentity(value["runner_pid"], value["runner_start_time"])
+        if runner != self.worker.child_identity:
+            raise RuntimeError("worker GPU identity does not match child identity")
+        proof = self.config.gpu_proof
+        probe = proof.residency_for_runner or proof.residency
+        if probe is None: raise RuntimeError("GPU expected-runner residency proof is required")
+        try:
+            evidence = await settle_residency(
+                lambda: probe(runner) if proof.residency_for_runner else probe(),
+                sleep=self._residency_sleep, monotonic=self._residency_clock)
+            self._validate_residency(evidence, runner)
+        except _ResidencyPending:
+            if proof.residency_for_runner is None or proof.memory is None:
+                raise
+            await self._gector_fallback(runner)
+            self._model_specific_ready = True
         self._ready = True
+
+    async def _memory(self):
+        value = self.config.gpu_proof.memory()
+        if inspect.isawaitable(value): value = await value
+        self._validate_memory(value)
+        return value
+
+    def _validate_memory(self, value):
+        if type(value) is not GPUMemoryObservation:
+            raise RuntimeError("GPU memory proof is invalid")
+        expected = self.config.gpu_proof.expected_supervisor
+        fields = (value.start_ns, value.end_ns, value.total_bytes, value.used_bytes, value.free_bytes)
+        if (value.gpu_uuid != self.config.gpu_uuid or value.supervisor != expected or
+                any(type(x) is not int for x in fields) or value.start_ns > value.end_ns or
+                value.total_bytes <= 0 or value.used_bytes < 0 or value.free_bytes < 0 or
+                value.used_bytes > value.total_bytes or value.free_bytes > value.total_bytes or
+                value.used_bytes + value.free_bytes > value.total_bytes):
+            raise RuntimeError("GPU memory proof is malformed or changed")
+
+    def _validate_residency(self, value, runner):
+        if (type(value) is not ResidencyEvidence or value.gpu_uuid != self.config.gpu_uuid or
+                value.supervisor != self.config.gpu_proof.expected_supervisor or
+                runner != self.worker.child_identity or runner not in value.runners or
+                len(value.runners) != 1):
+            raise RuntimeError("worker is not a proved GPU runner")
+
+    def _validate_child_identity(self, value, runner):
+        if (not isinstance(value, dict) or set(value) != {"gpu_uuid", "runner_pid", "runner_start_time", "cuda_nvml_agree"} or
+                type(value.get("runner_pid")) is not int or type(value.get("runner_start_time")) is not int or
+                value.get("gpu_uuid") != self.config.gpu_uuid or value.get("cuda_nvml_agree") is not True or
+                ProcessIdentity(value["runner_pid"], value["runner_start_time"]) != runner or
+                self.worker.child_identity != runner):
+            raise RuntimeError("worker GPU identity does not match child identity")
+
+    async def _gector_fallback(self, runner):
+        proof, pre = self.config.gpu_proof, self._preload_memory
+        if type(pre) is not GPUMemoryObservation:
+            raise RuntimeError("GECToR fallback baseline memory proof is unavailable")
+        self._validate_memory(pre)
+        async def sample():
+            self._validate_child_identity(await self.worker.call("gpu_identity"), runner)
+            witness = await self.worker.call("cuda_residency")
+            if witness != {"model_cuda_device": "cuda:0", "witness_exists": True,
+                           "witness_cuda_device": "cuda:0"}:
+                raise RuntimeError("GECToR CUDA witness is invalid")
+            try:
+                pending = proof.residency_for_runner(runner)
+                if inspect.isawaitable(pending): pending = await pending
+            except _ResidencyPending:
+                pass
+            else:
+                raise RuntimeError("GECToR fallback expected typed pending residency")
+            post = await self._memory()
+            if (post.gpu_uuid != pre.gpu_uuid or post.supervisor != pre.supervisor or
+                    post.total_bytes != pre.total_bytes or post.used_bytes <= pre.used_bytes):
+                raise RuntimeError("GECToR GPU memory residency effect is invalid")
+            return post
+        first, second = await sample(), await sample()
+        if (first.gpu_uuid, first.supervisor, first.total_bytes) != (second.gpu_uuid, second.supervisor, second.total_bytes):
+            raise RuntimeError("GECToR fallback observation identity changed")
+
+    def accepted_model_specific_residency(self):
+        return self._model_specific_ready
 
     @staticmethod
     def _decode(payload):
@@ -114,5 +205,6 @@ class GECToRProvider:
     async def unload(self):
         self._ready = False
         if self.worker is not None: await self.worker.close()
-        self.worker = self.profile = None; self._cleanup = True
+        self.worker = self.profile = None; self._preload_memory = None
+        self._model_specific_ready = False; self._cleanup = True
     async def verify_cleanup(self): return self._cleanup and self.worker is None

@@ -17,7 +17,9 @@ from aiohttp import web
 
 from services.llm.provisioning.volume import provision
 from services.llm.providers.config import GPUProof, SmolLMProviderConfig
-from services.llm.providers.gpu import ProcessIdentity, ResidencyEvidence
+from services.llm.providers.gpu import (GPUMemoryObservation, _ResidencyPending,
+                                        GPUProofError, OwnedOllamaSnapshot,
+                                        ProcessIdentity, ResidencyEvidence)
 from services.llm.providers.smollm import SmolLMProvider
 from services.llm.queue.contracts import ModelId
 from services.llm.resource_manager.contracts import CapacityProfile, SampleMetadata
@@ -31,9 +33,11 @@ def _profile(manifest: str, model: str) -> CapacityProfile:
 
 def _gpu_proof(*, cleanup=True) -> GPUProof:
     supervisor = ProcessIdentity(10, 42)
+    async def memory():
+        return GPUMemoryObservation("GPU-1", supervisor, 1, 2, 1000, 400, 600)
     return GPUProof(lambda: "GPU-1", lambda: cleanup,
         lambda: ResidencyEvidence("GPU-1", supervisor, (ProcessIdentity(11, 43),)),
-        expected_supervisor=supervisor)
+        expected_supervisor=supervisor, memory=memory)
 
 
 class SmolLMProviderTests(unittest.IsolatedAsyncioTestCase):
@@ -255,6 +259,119 @@ class SmolLMProviderTests(unittest.IsolatedAsyncioTestCase):
                     candidate._session, candidate._model = provider._session, provider._model
                     with self.assertRaises(RuntimeError): await candidate.ready()
                     self.assertFalse(candidate._ready)
+        finally:
+            await provider.unload()
+
+    async def test_readiness_settles_only_transient_empty_gpu_runner_observation(self):
+        provider, tmp = await self._loaded_provider()
+        try:
+            supervisor, runner = ProcessIdentity(10, 42), ProcessIdentity(11, 43)
+            now, calls = [0.0], [0]
+            async def residency():
+                calls[0] += 1
+                if calls[0] < 3:
+                    raise _ResidencyPending("GPU has no resident runner")
+                return ResidencyEvidence("GPU-1", supervisor, (runner,))
+            async def sleep(delay): now[0] += delay
+            provider.config = replace(provider.config, gpu_proof=GPUProof(
+                lambda: "GPU-1", lambda: True, residency, supervisor))
+            provider._residency_clock = lambda: now[0]
+            provider._residency_sleep = sleep
+            await provider.ready()
+            self.assertTrue(provider._ready)
+            self.assertEqual(3, calls[0])
+        finally:
+            await provider.unload()
+
+    async def test_fallback_requires_two_equal_endpoint_and_owned_topology_fences(self):
+        provider, tmp = await self._loaded_provider()
+        try:
+            supervisor = ProcessIdentity(10, 42)
+            daemon = ProcessIdentity(20, 52)
+            runner = ProcessIdentity(21, 53)
+            snapshots = [OwnedOllamaSnapshot(supervisor, daemon, (runner,))] * 2
+            memories = [GPUMemoryObservation("GPU-1", supervisor, 3, 4, 1000, 600, 400)]
+            calls = []
+            async def ownership():
+                calls.append("ownership")
+                return snapshots.pop(0)
+            async def memory():
+                calls.append("memory")
+                return memories[0]
+            provider._preload_memory = GPUMemoryObservation("GPU-1", supervisor, 1, 2, 1000, 400, 600)
+            provider.config = replace(provider.config, gpu_proof=GPUProof(
+                lambda: "GPU-1", lambda: True, expected_supervisor=supervisor,
+                memory=memory, ollama_ownership=ownership))
+            provider._resident_model = mock.AsyncMock(return_value=(provider._model + ":latest", 2, 2))
+            await provider._fallback_residency()
+            self.assertTrue(provider.accepted_model_specific_residency())
+            self.assertEqual(["ownership", "memory", "ownership"], calls)
+            self.assertEqual(2, provider._resident_model.await_count)
+        finally:
+            await provider.unload()
+
+    async def test_fallback_rejects_malformed_or_changed_owned_topology_and_endpoint(self):
+        provider, tmp = await self._loaded_provider()
+        try:
+            supervisor = ProcessIdentity(10, 42)
+            daemon = ProcessIdentity(20, 52)
+            runner = ProcessIdentity(21, 53)
+            provider._preload_memory = GPUMemoryObservation("GPU-1", supervisor, 1, 2, 1000, 400, 600)
+            async def memory():
+                return GPUMemoryObservation("GPU-1", supervisor, 3, 4, 1000, 600, 400)
+            invalid = (
+                OwnedOllamaSnapshot(supervisor, supervisor, (runner,)),
+                OwnedOllamaSnapshot(supervisor, daemon, (runner, runner)),
+                OwnedOllamaSnapshot(supervisor, daemon, (daemon,)),
+                OwnedOllamaSnapshot(ProcessIdentity(99, 42), daemon, (runner,)),
+            )
+            for snapshot in invalid:
+                with self.subTest(snapshot=snapshot):
+                    provider.config = replace(provider.config, gpu_proof=GPUProof(
+                        lambda: "GPU-1", lambda: True, expected_supervisor=supervisor,
+                        memory=memory, ollama_ownership=lambda snapshot=snapshot: snapshot))
+                    with self.assertRaises(RuntimeError):
+                        await provider._fallback_residency()
+            changed = [OwnedOllamaSnapshot(supervisor, daemon, (runner,)),
+                       OwnedOllamaSnapshot(supervisor, daemon, (ProcessIdentity(22, 54),))]
+            provider.config = replace(provider.config, gpu_proof=GPUProof(
+                lambda: "GPU-1", lambda: True, expected_supervisor=supervisor,
+                memory=memory, ollama_ownership=lambda: changed.pop(0)))
+            provider._resident_model = mock.AsyncMock(return_value=(provider._model + ":latest", 2, 2))
+            with self.assertRaisesRegex(RuntimeError, "ownership or endpoint changed"):
+                await provider._fallback_residency()
+        finally:
+            await provider.unload()
+
+    async def test_load_captures_memory_before_create(self):
+        provider, tmp = await self._loaded_provider()
+        await provider.unload()
+        provider = SmolLMProvider(provider.config)
+        order = []
+        provider._memory = mock.AsyncMock(side_effect=lambda: (order.append("memory") or
+            GPUMemoryObservation("GPU-1", ProcessIdentity(10, 42), 1, 2, 1000, 400, 600)))
+        provider._run_create = mock.AsyncMock(side_effect=lambda *args: order.append("create"))
+        profile = _profile(provider.config.manifest_sha256, provider.config.model_sha256)
+        with mock.patch.object(provider, "_prove_artifact", return_value=({}, Path("/tmp"), {})):
+            await provider.load(profile)
+        self.assertEqual(["memory", "create"], order)
+
+    async def test_nonpending_gpu_failure_never_uses_fallback_and_failed_ready_clears_bit(self):
+        provider, tmp = await self._loaded_provider()
+        try:
+            await provider.ready()
+            self.assertFalse(provider.accepted_model_specific_residency())
+            provider._model_specific_ready = True
+            proof = provider.config.gpu_proof
+            assert proof is not None
+            provider.config = replace(provider.config, gpu_proof=GPUProof(
+                proof.identity, proof.cleanup,
+                lambda: (_ for _ in ()).throw(RuntimeError("immediate failure")),
+                expected_supervisor=proof.expected_supervisor, memory=proof.memory))
+            with self.assertRaisesRegex(RuntimeError, "immediate failure"):
+                await provider.ready()
+            self.assertFalse(provider._ready)
+            self.assertFalse(provider.accepted_model_specific_residency())
         finally:
             await provider.unload()
 

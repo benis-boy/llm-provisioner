@@ -5,7 +5,27 @@ only part of the outcome implemented, **untested** is implemented without the
 required E2E proof, and **done** is implemented with the required E2E proof.
 Parents with mixed or missing evidence are assessed conservatively.
 
+Latest continuation closes Phase 0's contract/local exit: explicit decision
+ownership, canonical transition/invariant authorities and validated handwritten
+HTTP bindings. **145 task-related tests** and two additional **10-test**
+acceptance runs pass. This supports G1.1/G1.2/G2.1/G2.2/G3.1/G3.2/G4.1/G4.2/G4.3
+under G0, without changing any `partial` status. Phase completion is not product
+goal completion. Exact compatibility approval, measured provisioning and
+production deployment/E2E remain Phase 1/5/6 work. See the
+[bounded completion record](../../../../docs/queue-scheduler-resource-manager-plan-partial_completed.md#phase-0-complete--contracts-and-validated-bindings)
+and proof inventory; historical candidate failures are superseded by the
+completed three-model candidate below.
+
 ## G0 — Reliable, capacity-aware queued LLM work
+
+The rebuilt exact offline candidate now completes SmolLM → CoEdIT → GECToR →
+SmolLM with three cleanup-gated switches, cancellation and stale-authority
+fences, six stable-identity memory observations, final memory restoration, and
+owned-container cleanup. CoEdIT and GECToR retain exact child/CUDA witnesses and
+use their bounded model-specific fallback only when NVML omits the exact worker;
+foreign/baseline and unreadable PIDs remain non-authoritative. This is candidate
+evidence, not measured capacity or production deployment; G0/G4.1 remain
+**partial**.
 
 **partial —** Clients and operators can complete durable asynchronous LLM work
 reliably and efficiently on fixed GPU resources without losing accepted work,
@@ -77,8 +97,17 @@ replay and operation-specific store fences pass 130 task-related tests, with the
 eight-test acceptance module passing three additional runs. Missing dependencies
 in damaged state fail durably through evaluation and both claim paths. This
 supports G1.1/G1.2/G2.1/G2.2/G3.1/G3.2 without changing their **partial** status:
-full scheduler interactions and qualifying real-provider/deployment E2E remain
-open. Phase completion is not leaf-goal completion.
+qualifying real-provider/deployment E2E remains open. Phase completion is not
+leaf-goal completion.
+
+Phase 3 scheduler implementation/local acceptance is also complete: 150 related
+tests and three repeated 14-test acceptance runs cover lifecycle, cancellation,
+retry/watchdog, recovered function intent and deterministic gated insertion.
+Polling now fences and expires cached eligibility without delaying ready claims;
+fenced late completion releases local ownership while retaining truthful
+completed-response progress. G1.1/G1.2/G2.1/G2.2/G3.1/G3.2 remain **partial**
+pending qualifying production-boundary proof. See the Phase 3 completion record
+in the linked plan's evidence ledger; no new target outcome is introduced.
 
 Implementation boundary: G1–G3 have SQLite/result primitives, durable optional
 functions, bounded eligibility evaluation, and an async scheduler with local
@@ -230,8 +259,18 @@ GPU timing is explicitly incomplete, cancellation deliberately declines the
 advisory provider interruption, and process-crash recovery, HTTP deployment,
 distinct service users and production-image readiness are not established.
 
-The clean deployment foundation now stages 54 verified locked wheels, builds
+The initial clean deployment foundation stages 54 verified locked wheels, builds
 from the pinned CUDA runtime, and passes offline non-root bootstrap help/import
 and filesystem ownership smoke checks plus 14 focused unit tests. Serving is
 explicitly refused; separate-user supervision and OS package snapshot pinning
 remain missing. This supports G4.1/G4.3 without promoting either beyond **partial**.
+
+The subsequent distinct-user broker candidate supersedes that serve-refusal
+boundary: 58 focused tests and real network-disabled CPU/selected-GPU-exposed
+startup checks pass, with app `llm`, fixed root broker, daemon `ollama`, pinned
+version, private listener, duplicate rejection and EOF cleanup. Paired filesystem
+UID/GID switching enables cross-user listener proof without broad ptrace authority.
+This is not inference, NVML/residency, measured readiness or deployment approval.
+Complete privileged import-tree verification and broker-loss descendant
+containment remain release blockers; G0/G2.2/G4.1/G4.3 remain **partial**.
+See [candidate boundary and gates](../../../../docs/production-image-foundation.md#distinct-user-broker-continuation-2026-09-17).

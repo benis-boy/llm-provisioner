@@ -67,7 +67,11 @@ class ResourceManager(ResourceManagerClient):
         self._records: dict[str, dict[str, tuple[str, Submission]]] = {}
         self._request_attempts: dict[str, dict[tuple[str, str], str]] = {}
         self._pair_records: dict[str, dict[tuple[str, str], Submission]] = {}
-        self._validating: dict[str, dict[str, tuple[str, str]]] = {}
+        # A request may have more than one same-attempt validation in flight
+        # (for example, an idempotent retry racing the first submit).  Keep a
+        # reference count rather than one shared marker: one validator must not
+        # erase the cancellation fence owned by another.
+        self._validating: dict[str, dict[str, tuple[str, str, int]]] = {}
         self._start_records: dict[str, tuple[tuple[object, ...], SessionInfo]] = {}
         self._stop_records: dict[str, tuple[tuple[object, ...], str]] = {}
         self._cancel_records: dict[str, tuple[tuple[object, ...], bool]] = {}
@@ -217,6 +221,13 @@ class ResourceManager(ResourceManagerClient):
                             idempotency_key: str) -> SessionInfo:
         self._key(idempotency_key, "idempotency_key")
         args = (scheduler_id, ModelId(model_id), profile, provider)
+        # A known start replay must be rejected promptly once its session has
+        # been retired.  In particular it must not queue behind a replacement's
+        # cleanup while holding no authority to revive the old session.
+        async with self._lock:
+            previous = self._start_records.get(idempotency_key)
+            if previous and previous[0] == args and self._session != previous[1]:
+                raise self._error("scheduler_superseded", "start replay belongs to an old session")
         async with self._lifecycle_lock:
             if self._permanently_closed or not self._available:
                 raise self._error("resource_manager_unavailable", "cleanup has failed")
@@ -375,6 +386,15 @@ class ResourceManager(ResourceManagerClient):
             raise self._error("resource_manager_unavailable", "session is not ready")
         return self._session, self._profile, self._provider
 
+    def _release_validation_locked(self, session_token: str, request_id: str,
+                                   attempt: str, identity: str) -> None:
+        marker = self._validating.get(session_token, {}).get(request_id)
+        if marker and marker[:2] == (attempt, identity):
+            if marker[2] > 1:
+                self._validating[session_token][request_id] = (*marker[:2], marker[2] - 1)
+            else:
+                self._validating[session_token].pop(request_id, None)
+
     async def submit(self, session_token: str, request_id: str, attempt: str, payload: bytes,
                      *, idempotency_key: str, context_size=None, bucket_identity=None) -> Submission:
         self._key(idempotency_key, "idempotency_key")
@@ -396,7 +416,11 @@ class ResourceManager(ResourceManagerClient):
             validating = self._validating[session_token].get(request_id)
             if validating and validating[0] != attempt:
                 raise self._error("request_in_flight", "another attempt is being validated")
-            self._validating[session_token][request_id] = (attempt, identity)
+            if validating and validating[1] != identity:
+                # Validators for one request/attempt share a reference-counted
+                # reservation.  A different immutable input must not replace
+                # that marker: doing so strands the first validator's release.
+                raise self._error("idempotency_conflict", "request and attempt identity differs")
             old_identity = self._request_attempts[session_token].get(pair)
             if old_identity and old_identity != identity:
                 raise self._error("idempotency_conflict", "request and attempt identity differs")
@@ -406,61 +430,80 @@ class ResourceManager(ResourceManagerClient):
                 return replay
             if not self._available:
                 raise self._error("resource_manager_unavailable", "admission is closed")
-        if not profile.accepts_request(context_size, bucket_identity):
-            async with self._lock:
-                if self._validating[session_token].get(request_id) == (attempt, identity):
-                    self._validating[session_token].pop(request_id, None)
-            raise self._error("invalid_input", "request does not match exact capacity profile")
+            # Reserve validation only after all synchronous replay, conflict,
+            # and availability exits.  Replays must not leave a phantom
+            # reservation that changes a later cancellation outcome.
+            count = validating[2] + 1 if validating else 1
+            self._validating[session_token][request_id] = (attempt, identity, count)
+        reservation_released = False
+        def release() -> None:
+            nonlocal reservation_released
+            if not reservation_released:
+                self._release_validation_locked(session_token, request_id, attempt, identity)
+                reservation_released = True
         try:
+            if not profile.accepts_request(context_size, bucket_identity):
+                raise self._error("invalid_input", "request does not match exact capacity profile")
             await provider.validate_input(payload, context_size=context_size, bucket_identity=bucket_identity)
         except ResourceManagerError:
+            async with self._lock:
+                release()
             raise
         except Exception as exc:
+            async with self._lock:
+                release()
             raise self._error("invalid_input", str(exc)) from exc
+        except BaseException:
+            async with self._lock:
+                release()
+            raise
+        try:
+            async with self._lock:
+                # Fence and replay are both repeated after the await to close duplicate races.
+                session, profile, provider = self._check_session_locked(session_token)
+                # Keep this reservation until this admission lock is held.  A
+                # cancel between validation and admission therefore sees an
+                # owned request and fences it rather than returning a false
+                # no-op which would let this submit execute.
+                release()
+                if (session_token, request_id) in self._cancelled_requests:
+                    self._emit_locked(session, EventKind.CANCELLED, request_id=request_id, attempt=attempt)
+                    raise self._error("request_cancelled", "request was cancelled")
+                known = self._records[session_token].get(idempotency_key)
+                if known:
+                    if known[0] != identity: raise self._error("idempotency_conflict", "payload differs")
+                    return known[1]
+                pair = (request_id, attempt)
+                for work in (*self._active.values(), *self._buffer):
+                    if work.request_id == request_id and work.attempt != attempt:
+                        raise self._error("request_in_flight", "another attempt for request is active")
+                old_identity = self._request_attempts[session_token].get(pair)
+                if old_identity and old_identity != identity:
+                    raise self._error("idempotency_conflict", "request and attempt identity differs")
+                if old_identity == identity:
+                    replay = self._pair_records[session_token][pair]
+                    self._records[session_token][idempotency_key] = (identity, replay)
+                    return replay
+                p = profile.optimal_parallelism
+                if len(self._active) + len(self._buffer) >= 2 * p:
+                    return Submission(False, request_id, attempt, session_token, session.generation, True)
+                result = Submission(True, request_id, attempt, session_token, session.generation)
+                self._records[session_token][idempotency_key] = (identity, result)
+                self._request_attempts[session_token][pair] = identity
+                self._pair_records[session_token][pair] = result
+                work = _Work(session, request_id, attempt, identity, bytes(payload))
+                if len(self._active) < p:
+                    self._active[work.key] = work
+                    self._emit_locked(session, EventKind.ADMISSION, request_id=request_id, attempt=attempt)
+                    work.slot_started = time.monotonic()
+                    work.task = asyncio.create_task(self._run(work, provider))
+                else:
+                    self._buffer.append(work)
+                    self._emit_locked(session, EventKind.BUFFERED, request_id=request_id, attempt=attempt)
+                return result
         finally:
             async with self._lock:
-                if self._validating[session_token].get(request_id) == (attempt, identity):
-                    self._validating[session_token].pop(request_id, None)
-        async with self._lock:
-            # Fence and replay are both repeated after the await to close duplicate races.
-            session, profile, provider = self._check_session_locked(session_token)
-            if (session_token, request_id) in self._cancelled_requests:
-                self._emit_locked(session, EventKind.CANCELLED, request_id=request_id, attempt=attempt)
-                raise self._error("request_cancelled", "request was cancelled")
-            if self._validating[session_token].get(request_id) == (attempt, identity):
-                self._validating[session_token].pop(request_id, None)
-            known = self._records[session_token].get(idempotency_key)
-            if known:
-                if known[0] != identity: raise self._error("idempotency_conflict", "payload differs")
-                return known[1]
-            pair = (request_id, attempt)
-            for work in (*self._active.values(), *self._buffer):
-                if work.request_id == request_id and work.attempt != attempt:
-                    raise self._error("request_in_flight", "another attempt for request is active")
-            old_identity = self._request_attempts[session_token].get(pair)
-            if old_identity and old_identity != identity:
-                raise self._error("idempotency_conflict", "request and attempt identity differs")
-            if old_identity == identity:
-                replay = self._pair_records[session_token][pair]
-                self._records[session_token][idempotency_key] = (identity, replay)
-                return replay
-            p = profile.optimal_parallelism
-            if len(self._active) + len(self._buffer) >= 2 * p:
-                return Submission(False, request_id, attempt, session_token, session.generation, True)
-            result = Submission(True, request_id, attempt, session_token, session.generation)
-            self._records[session_token][idempotency_key] = (identity, result)
-            self._request_attempts[session_token][pair] = identity
-            self._pair_records[session_token][pair] = result
-            work = _Work(session, request_id, attempt, identity, bytes(payload))
-            if len(self._active) < p:
-                self._active[work.key] = work
-                self._emit_locked(session, EventKind.ADMISSION, request_id=request_id, attempt=attempt)
-                work.slot_started = time.monotonic()
-                work.task = asyncio.create_task(self._run(work, provider))
-            else:
-                self._buffer.append(work)
-                self._emit_locked(session, EventKind.BUFFERED, request_id=request_id, attempt=attempt)
-            return result
+                release()
 
     @staticmethod
     def _provider_failure(exc: BaseException) -> Failure:
@@ -530,24 +573,38 @@ class ResourceManager(ResourceManagerClient):
                 self._check_session_locked(session_token)
                 return old[1]
             session, _, provider = self._check_session_locked(session_token)
-            if self._validating[session_token].get(request_id):
+            validating = self._validating[session_token].get(request_id)
+            active = tuple(work for work in self._active.values()
+                           if work.request_id == request_id)
+            buffered = tuple(work for work in self._buffer
+                             if work.request_id == request_id)
+            # Validation, buffering, and execution can overlap while duplicate
+            # submissions race.  Cancellation is a request fence, not a phase
+            # shortcut: fence every ownership record before any advisory call.
+            if validating:
                 self._cancelled_requests.add((session_token, request_id))
-                self._validating[session_token].pop(request_id, None)
-                self._emit_locked(session, EventKind.CANCELLED, request_id=request_id)
+            for work in buffered:
+                self._buffer.remove(work)
+                work.cancelled = True
+            for work in active:
+                work.cancelled = True
+            if validating or buffered or active:
+                # An active execution still emits its finished response (with
+                # no result) as watchdog evidence.  Do not terminalize it
+                # early; validation/buffer-only work has no such completion.
+                if not active:
+                    self._emit_locked(session, EventKind.CANCELLED, request_id=request_id,
+                                      attempt=buffered[0].attempt if buffered else None)
                 self._cancel_records[idempotency_key] = (args, True)
-                return True
-            for work in tuple(self._buffer):
-                if work.request_id == request_id:
-                    self._buffer.remove(work); work.cancelled = True
-                    self._emit_locked(session, EventKind.CANCELLED, request_id=request_id, attempt=work.attempt)
-                    self._cancel_records[idempotency_key] = (args, True)
-                    return True
-            work = next((item for item in self._active.values() if item.request_id == request_id), None)
-            if not work:
+                should_cancel = bool(active)
+            else:
                 self._cancel_records[idempotency_key] = (args, False)
-                return False
-            work.cancelled = True
-            self._cancel_records[idempotency_key] = (args, True)
+                should_cancel = False
+            cancelled = validating or buffered or active
+        if not cancelled:
+            return False
+        if not should_cancel:
+            return True
         try:
             await self._bounded(provider.cancel(request_id), time.monotonic() + self.cleanup_timeout)
         except Exception:

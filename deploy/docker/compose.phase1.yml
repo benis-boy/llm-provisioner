@@ -1,0 +1,37 @@
+# Offline Phase1 skeleton.  Populate the named volumes from the verified
+# release artifact before starting; the service never pulls models.
+services:
+  llm:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    command: ["serve", "/etc/llm/bootstrap.json", "--state-dir", "/var/lib/llm",
+               "--result-dir", "/var/lib/llm/results", "--host-pid-namespace"]
+    pid: host
+    network_mode: none
+    volumes:
+      - llm-provider-state:/var/lib/llm
+      - llm-provider-ollama:/var/lib/ollama
+      - type: bind
+        source: ./config
+        target: /etc/llm
+        read_only: true
+      - type: bind
+        source: ./models
+        target: /srv/llm/artifacts
+        read_only: true
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_DATASETS_OFFLINE: "1"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+              device_ids: ["${LLM_GPU_UUID:?set LLM_GPU_UUID to the selected GPU UUID}"]
+volumes:
+  llm-provider-state:
+    name: llm-provider-state
+  llm-provider-ollama:
+    name: llm-provider-ollama

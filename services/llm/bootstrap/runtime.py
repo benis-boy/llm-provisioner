@@ -70,6 +70,7 @@ class BootstrapRuntime:
         self._capture, self._daemon_factory, self.core = proof_capture, daemon_factory, core or ResourceManager()
         self.proof = None
         self.daemon = None
+        self._daemon_started = False
         self.prepared: PreparedBindings | None = None
         self.result_store: ResultStore | None = None
         self.http: ResourceManagerHttpServer | None = None
@@ -199,8 +200,16 @@ class BootstrapRuntime:
     def _typed_proof(self) -> GPUProof:
         if self.proof is None:
             raise RuntimeError("GPU proof has not been captured")
+        def daemon_ownership_snapshot():
+            # The daemon receives this same proof object.  Its ownership probe
+            # must fail closed until startup has established daemon authority.
+            if self.daemon is None or not self._daemon_started:
+                raise RuntimeError("Ollama ownership snapshot is unavailable before daemon startup")
+            return self.daemon.ownership_snapshot()
+
         return GPUProof(self.proof.identity, self.proof.cleanup, self.proof.residency,
-                        self.proof.supervisor_identity)
+                        self.proof.supervisor_identity, self.proof.residency_for_runner,
+                        self.proof.memory, daemon_ownership_snapshot)
 
     async def _fence(self, reason: str) -> None:
         self._fenced = True
@@ -224,6 +233,7 @@ class BootstrapRuntime:
             typed_proof = self._typed_proof()
             self.daemon = self._daemon_factory(self.config, typed_proof)
             version = await self.daemon.start()
+            self._daemon_started = True
             self._ollama_version = version
             if self._fenced: raise RuntimeError("runtime is fenced")
             observed = observe_runtime_identities(version)
@@ -349,6 +359,7 @@ class BootstrapRuntime:
             await stage(self.health.close())
         if self.daemon is not None:
             await stage(self.daemon.close())
+            self._daemon_started = False
         if self.prepared is not None:
             try:
                 self.prepared.close()

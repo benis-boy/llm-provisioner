@@ -50,8 +50,13 @@ class QueueScheduler:
         # Capture connection metadata on its owning thread. SQLite connections
         # are deliberately never touched from worker threads.
         self._publisher_state_path = self.publisher.db.execute("PRAGMA database_list").fetchone()[2]
+        if not callable(clock):
+            raise ValueError("scheduler clock must be callable")
+        # This process-local monotonic clock is exclusively for watchdog and
+        # shutdown elapsed time. QueueStore owns durable wall-clock timestamps.
         self.evaluator = evaluator or EligibilityEvaluator(store)
-        self.clock, self.watchdog_seconds, self.loop_interval, self.stop_timeout = clock, watchdog_seconds, loop_interval, stop_timeout
+        self.clock = clock
+        self.watchdog_seconds, self.loop_interval, self.stop_timeout = watchdog_seconds, loop_interval, stop_timeout
         self.local_session = self.rm_session = None
         self._tasks: set[asyncio.Task[Any]] = set()
         # A cancelled asyncio wrapper does not stop its executor thread. Keep
@@ -59,6 +64,12 @@ class QueueScheduler:
         # publisher may still be inside its transaction.
         self._publisher_workers: set[asyncio.Task[Any]] = set()
         self._wake = asyncio.Event()
+        self._eligibility_wake = asyncio.Event()
+        self._evaluation_lock = asyncio.Lock()
+        self._next_evaluation_at = 0.0
+        self._evaluation = None
+        self._evaluation_version = None
+        self._evaluation_invalidation = None
         self._started = False
         self._stopping = False
         self._pending: dict[tuple[str, str], tuple[bytes, DispatchContext]] = {}
@@ -136,7 +147,9 @@ class QueueScheduler:
 
     def _reset_process_state(self):
         self._pending.clear(); self._active.clear(); self._seen_sequences.clear()
-        self._cursor = 0; self._watchdog_deadline = None; self._eligible = False; self._wake.clear()
+        self._cursor = 0; self._watchdog_deadline = None; self._eligible = False; self._wake.clear(); self._eligibility_wake.clear()
+        self._next_evaluation_at = 0.0; self._evaluation = None
+        self._evaluation_version = self._evaluation_invalidation = None
         self._lease_cursor = None; self._completion_sequence = 0; self._result_pending.clear()
 
     def _spawn(self, awaitable: Any):
@@ -162,7 +175,9 @@ class QueueScheduler:
         if not self._stopping: await self.stop(reason)
 
     async def enqueue(self, *args, **kwargs):
-        row = self.store.enqueue(*args, **kwargs); self._wake.set(); return row
+        row = self.store.enqueue(*args, **kwargs)
+        self._invalidate_evaluation()
+        return row
 
     async def get(self, request_id: str):
         return self.store.get(request_id)
@@ -182,7 +197,17 @@ class QueueScheduler:
         for key in tuple(self._pending):
             if key[0] == request_id: self._pending.pop(key, None)
         await self._drain_cancellations()
-        self._wake.set(); return row
+        self._invalidate_evaluation()
+        return row
+
+    def _invalidate_evaluation(self) -> None:
+        """Wake a local mutation without treating loop cadence as durability time."""
+        self.evaluator.invalidate()
+        self._evaluation = None
+        self._next_evaluation_at = 0.0
+        self._evaluation_version = self._evaluation_invalidation = None
+        self._wake.set()
+        self._eligibility_wake.set()
 
     async def stop(self, reason: str = "stopped", *, cancelled: bool = False,
                    idempotency_key: str | None = None):
@@ -239,7 +264,7 @@ class QueueScheduler:
     async def _eligibility_loop(self):
         while not self._stopping:
             try:
-                candidate = await self.evaluator.next_eligible(claim=False)
+                candidate = await self._poll_eligibility()
                 self._eligible = bool(candidate and candidate.eligible)
                 if self._eligible:
                     self._arm_watchdog()
@@ -248,7 +273,52 @@ class QueueScheduler:
                 # Evaluator records request-local errors; an unexpected failure
                 # is handled by the task boundary rather than silently skipped.
                 raise
-            await asyncio.sleep(self.loop_interval)
+            # `poll_interval` is the configured reevaluation contract.  Local
+            # mutations wake evaluation immediately; independent writers are
+            # observed on the bounded poll without turning it into a busy loop.
+            try:
+                await asyncio.wait_for(self._eligibility_wake.wait(), self.evaluator.poll_interval)
+            except asyncio.TimeoutError:
+                pass
+            self._eligibility_wake.clear()
+
+    async def _poll_eligibility(self):
+        """Evaluate at the configured cadence and retain one guarded claim.
+
+        The dispatch loop may run faster for cancellation, replay, watchdog and
+        capacity work, but optional functions must not be reinvoked faster than
+        their configured poll cadence. Local queue mutations invalidate both the
+        evaluator and this cached capability and wake a fresh evaluation.
+        """
+        version = self.store.eligibility_version()
+        invalidation = self.evaluator.invalidation_epoch
+        if (self._evaluation_version != version or
+                self._evaluation_invalidation != invalidation):
+            # Publication, retry, an independent writer, or an explicit
+            # evaluator.invalidate() invalidates a capability immediately.
+            self._evaluation = None
+            self._next_evaluation_at = 0.0
+        if self._evaluation is not None and self.clock() < self._next_evaluation_at:
+            return self._evaluation
+        if self.clock() < self._next_evaluation_at:
+            return None
+        async with self._evaluation_lock:
+            version = self.store.eligibility_version()
+            invalidation = self.evaluator.invalidation_epoch
+            if (self._evaluation_version != version or
+                    self._evaluation_invalidation != invalidation):
+                self._evaluation = None
+                self._next_evaluation_at = 0.0
+            if self._evaluation is not None and self.clock() < self._next_evaluation_at:
+                return self._evaluation
+            if self.clock() < self._next_evaluation_at:
+                return None
+            candidate = await self.evaluator.next_eligible(claim=False)
+            self._next_evaluation_at = self.clock() + self.evaluator.poll_interval
+            self._evaluation = candidate
+            self._evaluation_version = self.store.eligibility_version()
+            self._evaluation_invalidation = self.evaluator.invalidation_epoch
+            return candidate
 
     async def _dispatch_loop(self):
         while not self._stopping:
@@ -281,10 +351,22 @@ class QueueScheduler:
             if self.store.get(request_id)["status"] in {"cancelled", "error", "done"}:
                 self._pending.pop((request_id, token), None); return True
             return await self._submit(request_id, token, payload, context)
-        evaluation = await self.evaluator.next_eligible(claim=False)
+        evaluation = await self._poll_eligibility()
         if not evaluation or not evaluation.eligible or not evaluation.capability: return False
         self._arm_watchdog()
-        token = self.store.claim_evaluated(evaluation.capability)
+        try:
+            token = self.store.claim_evaluated(evaluation.capability)
+        except StaleCallback:
+            # An independent durable writer may invalidate the cached
+            # capability between evaluation and this bounded dispatch turn.
+            self._invalidate_evaluation()
+            return True
+        self._evaluation = None
+        self._eligible = False
+        # A successful claim changes the queue version. Do not apply the
+        # blocked-queue callback cadence to the next eligible request.
+        self._next_evaluation_at = 0.0
+        self._evaluation_version = self._evaluation_invalidation = None
         if not token: return True
         self._active.add((evaluation.request_id, token))
         row = self.store.get(evaluation.request_id)
@@ -376,9 +458,9 @@ class QueueScheduler:
         return result
 
     def _retry_one(self, request_id: str, token: str, retryable: bool):
-        try: self.store.retry(request_id, token, self.local_session.token, self.local_session.generation, now=time.time(), retryable=retryable)
+        try: self.store.retry(request_id, token, self.local_session.token, self.local_session.generation, retryable=retryable)
         except (StaleCallback, SessionError): pass
-        self._pending.pop((request_id, token), None); self._active.discard((request_id, token)); self._wake.set()
+        self._pending.pop((request_id, token), None); self._active.discard((request_id, token)); self._invalidate_evaluation()
 
     async def _progress_loop(self, token: str):
         async for event in self.rm.watch_progress(token, self._cursor):
@@ -554,6 +636,11 @@ class QueueScheduler:
                                          f"handoff:{event.request_id}:{event.attempt}")
             except StaleCallback:
                 self._result_pending.pop(key, None)
+                # A terminal fence can reject a late finished result even when
+                # RM's advisory cancellation event was lost.  It must not keep
+                # watchdog ownership alive after durable terminalization.
+                self._active.discard(key)
+                self._pending.pop(key, None)
                 return
             except (OSError, IOError, sqlite3.Error):
                 await asyncio.sleep(self.loop_interval)
@@ -561,4 +648,5 @@ class QueueScheduler:
             self._result_pending.pop(key, None)
             self._active.discard(key)
             self._pending.pop(key, None)
+            self._invalidate_evaluation()
             return

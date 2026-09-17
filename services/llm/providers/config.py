@@ -7,12 +7,15 @@ import re
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from .gpu import ResidencyEvidence, ProcessIdentity
+from .gpu import GPUMemoryObservation, ResidencyEvidence, ProcessIdentity, OwnedOllamaSnapshot
 
 
 GPUProbe = Callable[[], str | Awaitable[str]]
 CleanupProbe = Callable[[], bool | Awaitable[bool]]
 ResidencyProbe = Callable[[], ResidencyEvidence | Awaitable[ResidencyEvidence]]
+ExpectedRunnerResidencyProbe = Callable[[ProcessIdentity], ResidencyEvidence | Awaitable[ResidencyEvidence]]
+MemoryProbe = Callable[[], GPUMemoryObservation | Awaitable[GPUMemoryObservation]]
+OllamaOwnershipProbe = Callable[[], OwnedOllamaSnapshot | Awaitable[OwnedOllamaSnapshot]]
 
 
 @dataclass(frozen=True)
@@ -21,6 +24,11 @@ class GPUProof:
     cleanup: CleanupProbe
     residency: ResidencyProbe | None = None
     expected_supervisor: ProcessIdentity | None = None
+    # Optional compatibility extension. Existing providers retain the generic
+    # proof, while isolated workers can require this exact child identity.
+    residency_for_runner: ExpectedRunnerResidencyProbe | None = None
+    memory: MemoryProbe | None = None
+    ollama_ownership: OllamaOwnershipProbe | None = None
 
     def __post_init__(self) -> None:
         if self.expected_supervisor is not None:
@@ -28,6 +36,12 @@ class GPUProof:
                     type(self.expected_supervisor.pid) is not int or self.expected_supervisor.pid <= 0 or
                     type(self.expected_supervisor.start_time) is not int or self.expected_supervisor.start_time < 0):
                 raise ValueError("expected supervisor identity is invalid")
+        if self.residency_for_runner is not None and not callable(self.residency_for_runner):
+            raise ValueError("expected-runner residency proof must be callable")
+        if self.memory is not None and not callable(self.memory):
+            raise ValueError("GPU memory proof must be callable")
+        if self.ollama_ownership is not None and not callable(self.ollama_ownership):
+            raise ValueError("Ollama ownership proof must be callable")
 
 
 @dataclass(frozen=True)

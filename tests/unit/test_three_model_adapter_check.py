@@ -7,7 +7,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from services.llm.providers.config import GPUProof
-from services.llm.providers.gpu import GPUMemoryObservation, ProcessIdentity, ResidencyEvidence
+from services.llm.providers.gpu import (_ResidencyPending, GPUMemoryObservation, ProcessIdentity,
+                                        ResidencyEvidence)
 from services.llm.resource_manager.protocol import ProviderResponse
 from tools.compatibility import three_model_adapter_check as check
 
@@ -18,15 +19,17 @@ class _Proof:
     async def identity(self): return "GPU-test"
     async def cleanup(self): return self.clean
     async def residency(self): return ResidencyEvidence("GPU-test", self.supervisor_identity, (ProcessIdentity(101, 2),))
+    async def residency_for_runner(self, expected):
+        return ResidencyEvidence("GPU-test", self.supervisor_identity, (expected,))
     async def memory(self):
         return GPUMemoryObservation("GPU-test", self.supervisor_identity, 10, 11,
                                      1000, 400, 600)
 
 
 class _Provider:
-    def __init__(self, model): self.model, self.cleaned = model, False
+    def __init__(self, model): self.model, self.cleaned, self.load_calls = model, False, 0
     async def validate(self, profile): pass
-    async def load(self, profile): pass
+    async def load(self, profile): self.load_calls += 1
     async def ready(self): pass
     async def validate_input(self, payload, *, context_size, bucket_identity): pass
     async def execute(self, request_id, payload):
@@ -40,12 +43,171 @@ class _OwnedOllama:
     instances = []
     def __init__(self, config, proof):
         self.config, self.gpu_proof, self.closed = config, proof, False
+        # Production exposes the ownership probe; this test double does not
+        # model daemon membership, so leave the optional probe absent.
+        self.ownership_snapshot = lambda: None
         self.__class__.instances.append(self)
     async def start(self): return "0.11.6"
     async def close(self): self.closed = True
 
 
 class ThreeModelAdapterCheckTests(unittest.TestCase):
+    def test_post_load_residency_settles_transient_empty_observation(self):
+        class SettlingProof:
+            def __init__(self): self.calls = 0
+            async def residency(self):
+                self.calls += 1
+                if self.calls < 3:
+                    raise _ResidencyPending("GPU has no resident runner")
+                return ResidencyEvidence("GPU-test", ProcessIdentity(100, 1),
+                                         (ProcessIdentity(101, 2),))
+
+        proof = SettlingProof()
+        now = [0.0]
+
+        async def sleep(duration):
+            now[0] += duration
+
+        async def exercise():
+            await check._post_load_residency(proof, sleep=sleep, monotonic=lambda: now[0])
+
+        asyncio.run(exercise())
+        self.assertEqual(3, proof.calls)
+        self.assertEqual(.4, now[0])
+
+    def test_post_load_residency_cancellation_propagates(self):
+        class PersistentProof:
+            async def residency(self):
+                raise _ResidencyPending("GPU has no resident runner")
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def sleep(duration):
+            started.set()
+            await release.wait()
+
+        async def exercise():
+            task = asyncio.create_task(check._post_load_residency(
+                PersistentProof(), sleep=sleep))
+            await started.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertTrue(task.done())
+            self.assertFalse(release.is_set())
+
+        asyncio.run(exercise())
+
+    def test_gate_settles_transient_owned_runner_before_load(self):
+        class SettlingProof:
+            cleanup_reason = "owned_runner_present"
+            def __init__(self): self.calls = 0
+            async def cleanup(self):
+                self.calls += 1
+                return self.calls == 3
+
+        provider = _Provider("CoEdIT")
+        proof = SettlingProof()
+        now = [0.0]
+
+        async def sleep(duration):
+            now[0] += duration
+
+        async def exercise():
+            await check._GateProvider(provider, proof, cleanup_interval=.2,
+                                       cleanup_timeout=1.0, sleep=sleep,
+                                       monotonic=lambda: now[0]).load(None)
+
+        asyncio.run(exercise())
+        self.assertEqual(3, proof.calls)
+        self.assertEqual(1, provider.load_calls)
+
+    def test_gate_persistent_cleanup_timeout_does_not_load(self):
+        class PersistentProof:
+            cleanup_reason = "owned_runner_present"
+            async def cleanup(self): return False
+
+        provider = _Provider("CoEdIT")
+        now = [0.0]
+
+        async def sleep(duration): now[0] += duration
+
+        async def exercise():
+            with self.assertRaisesRegex(RuntimeError, "reason=owned_runner_present"):
+                await check._GateProvider(provider, PersistentProof(), cleanup_interval=.2,
+                                           cleanup_timeout=.5, sleep=sleep,
+                                           monotonic=lambda: now[0]).load(None)
+
+        asyncio.run(exercise())
+        self.assertEqual(0, provider.load_calls)
+
+    def test_gate_cleanup_exception_fails_closed_without_load(self):
+        class BrokenProof:
+            async def cleanup(self): raise RuntimeError("unbounded detail")
+
+        provider = _Provider("CoEdIT")
+
+        async def exercise():
+            with self.assertRaisesRegex(RuntimeError, "reason=gpu_cleanup_probe_failed"):
+                await check._GateProvider(provider, BrokenProof()).load(None)
+
+        asyncio.run(exercise())
+        self.assertEqual(0, provider.load_calls)
+
+    def test_gate_cancellation_during_settling_propagates(self):
+        class PersistentProof:
+            cleanup_reason = "owned_runner_present"
+            async def cleanup(self): return False
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def sleep(duration):
+            started.set()
+            await release.wait()
+
+        async def exercise():
+            task = asyncio.create_task(check._GateProvider(
+                _Provider("CoEdIT"), PersistentProof(), sleep=sleep).load(None))
+            await started.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertTrue(task.done())
+            self.assertFalse(release.is_set())
+
+        asyncio.run(exercise())
+
+    def test_transition_diagnostics_preserve_control_flow_and_bound_messages(self):
+        with self.assertRaises(asyncio.CancelledError):
+            raise check._transition_failure(asyncio.CancelledError(), 1, "SmolLM", "load")
+        failure = check.ResourceManagerError(check.Failure("model_load_failed",
+            "prompt={secret}" * 1000, True))
+        wrapped = check._transition_failure(failure, 2, "CoEdIT", "load")
+        self.assertEqual(wrapped.failure.code, "model_load_failed")
+        self.assertTrue(wrapped.failure.retryable)
+        self.assertLessEqual(len(wrapped.failure.message), 220)
+        self.assertNotIn("secret", wrapped.failure.message)
+
+        class Hostile:
+            def __str__(self):
+                raise AssertionError("diagnostic stringification must not run")
+        self.assertEqual("<unavailable>", check._safe_message(Hostile()))
+        self.assertEqual("<redacted>", check._safe_message("Bearer secret-token"))
+
+    def test_provider_cleanup_verification_obeys_lifecycle_timeout(self):
+        class HangingProvider:
+            async def verify_cleanup(self):
+                await asyncio.Event().wait()
+        self.assertFalse(asyncio.run(check._providers_clean([HangingProvider()], .01)))
+
+    def test_temporary_root_deletion_failure_is_bounded(self):
+        errors = []
+        with patch.object(check.shutil, "rmtree", side_effect=OSError("path leak")):
+            check._remove_root(Path("/tmp/owned-root"), errors)
+        self.assertEqual(errors, ["temporary_storage_cleanup_failed"])
+
     def test_profiles_use_provisioned_digest_and_exact_model_file(self):
         document = {"manifest_sha256": "a" * 64, "models": {}}
         for model, files in check.SPECS.items():
@@ -82,6 +244,7 @@ class ThreeModelAdapterCheckTests(unittest.TestCase):
         self.assertEqual({item["total_bytes"] for item in observations}, {1000})
         self.assertEqual({"label", "sequence_index", "start_ns", "end_ns",
                            "total_bytes", "used_bytes", "free_bytes"}, set(observations[0]))
+        self.assertIsNotNone(_OwnedOllama.instances[-1].gpu_proof.residency_for_runner)
 
     def test_memory_samples_are_chronological_and_unmeasured_after_lifecycle_boundaries(self):
         """Whole-device points are telemetry, not capacity or peak evidence."""
@@ -294,10 +457,13 @@ class ThreeModelAdapterCheckTests(unittest.TestCase):
 
         scenarios = (
             ({"failure_call": 1}, "synthetic memory read failure"),
-            ({"failure_call": 2}, "synthetic memory read failure"),
+            ({"failure_call": 2},
+             "transition=0 model=SmolLM stage=memory: exception=RuntimeError; message=<unavailable>"),
             ({"failure_call": 6}, "synthetic memory read failure"),
-            ({"changed_call": 2, "changed_field": "total"}, "GPU memory identity or total capacity changed"),
-            ({"changed_call": 2, "changed_field": "uuid"}, "GPU memory UUID changed or mismatched"),
+            ({"changed_call": 2, "changed_field": "total"},
+             "transition=0 model=SmolLM stage=memory: exception=RuntimeError; message=<unavailable>"),
+            ({"changed_call": 2, "changed_field": "uuid"},
+             "transition=0 model=SmolLM stage=memory: exception=RuntimeError; message=<unavailable>"),
             ({"changed_call": 6, "changed_field": "total"}, "GPU memory identity or total capacity changed"),
             ({"changed_call": 6, "changed_field": "uuid"}, "GPU memory UUID changed or mismatched"),
             ({"wrong_baseline": True}, "GPU memory UUID changed or mismatched"),

@@ -3,9 +3,14 @@ info:
   title: LLM Queue and Resource Manager
   version: 0.1.0
   description: >-
-    Implemented Resource Manager shared-storage binding plus retained Phase 0
-    scheduler, provisioning, health, and metrics target contracts. Operations
-    marked x-implementation: future are documented targets, not HTTP adapters.
+    Phase 0 contract authority for the implemented scheduler, Resource Manager,
+    artifact-verification, profile-validation, and health HTTP boundaries. The
+    Resource Manager uses server-owned providers and exact measured profiles;
+    request payloads cross the boundary as shared content-addressed references.
+    The following operations are intentionally retained future contracts and
+    have no adapter in this phase: GET /resource-manager/capacity, POST
+    /provisioning/measure-capacity, and GET /metrics. Their schemas are
+    forward-compatible targets, not evidence of implementation.
 servers: [{url: http://127.0.0.1:8080}]
 tags: [{name: scheduler}, {name: resource-manager}, {name: provisioning}, {name: health}]
 paths:

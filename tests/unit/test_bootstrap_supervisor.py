@@ -1,12 +1,17 @@
 """Test-owned loopback evidence for the private Ollama lifecycle."""
 import asyncio
+import ctypes
+import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import sys
+import signal
 import tempfile
 import unittest
 import warnings
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from services.llm.bootstrap.supervisor import OllamaSupervisorError, OwnedOllama
@@ -321,7 +326,11 @@ while True:
                 await release.wait()
                 return process
 
-            daemon = self.supervisor(root, timeout=.2)
+            # The artificial spawn-return gate consumes part of startup's
+            # end-to-end deadline.  Keep this test focused on concurrent close
+            # ownership rather than requiring the test-owned daemon to bind and
+            # answer health inside the remaining ~180 ms.
+            daemon = self.supervisor(root)
             with patch("asyncio.create_subprocess_exec", delayed):
                 starting = asyncio.create_task(daemon.start())
                 await entered.wait()
@@ -394,6 +403,108 @@ while True:
             send.assert_not_called()
             self.assertEqual(daemon._pidfds, {})
 
+    def test_cross_uid_listener_probe_restores_filesystem_uid_and_gid(self):
+        """The fd-link proof switches and restores the complete fs pair."""
+        with tempfile.TemporaryDirectory() as root:
+            daemon = self.supervisor(root)
+            daemon.process = SimpleNamespace(pid=os.getpid(), returncode=None)
+            daemon._fence = __import__("services.llm.bootstrap.supervisor", fromlist=["_fence"])._fence(os.getpid())
+            calls = []
+            class Libc:
+                def __init__(self): self.uid, self.gid = 77, 66
+                def setfsuid(self, value):
+                    calls.append(("uid", value))
+                    if value == -1: return self.uid
+                    old, self.uid = self.uid, value
+                    return old
+                def setfsgid(self, value):
+                    calls.append(("gid", value))
+                    if value == -1: return self.gid
+                    old, self.gid = self.gid, value
+                    return old
+            libc = Libc()
+            account = SimpleNamespace(pw_uid=1002, pw_gid=1002)
+            fd = SimpleNamespace(is_symlink=lambda: True)
+            with patch("services.llm.bootstrap.supervisor.ctypes.CDLL", return_value=libc), \
+                 patch("services.llm.bootstrap.supervisor.pwd.getpwnam", return_value=account), \
+                 patch.object(daemon, "_proc_net_inode", return_value={7}), \
+                 patch("services.llm.bootstrap.supervisor.Path.iterdir", return_value=[fd]), \
+                 patch("services.llm.bootstrap.supervisor.os.readlink", return_value="socket:[7]"), \
+                 patch.object(daemon, "_assert_owned", return_value=daemon._fence):
+                daemon.launch_user = True
+                self.assertTrue(daemon._owned_listener())
+            self.assertEqual((libc.uid, libc.gid), (77, 66))
+            self.assertEqual(calls, [("gid", 1002), ("gid", -1), ("uid", 1002), ("uid", -1),
+                                     ("uid", 77), ("uid", -1), ("gid", 66), ("gid", -1)])
+
+    def test_cross_uid_listener_probe_permission_error_restores_pair(self):
+        with tempfile.TemporaryDirectory() as root:
+            daemon = self.supervisor(root)
+            daemon.process = SimpleNamespace(pid=os.getpid(), returncode=None)
+            daemon._fence = __import__("services.llm.bootstrap.supervisor", fromlist=["_fence"])._fence(os.getpid())
+            class Libc:
+                def __init__(self): self.uid, self.gid = 77, 66
+                def setfsuid(self, value):
+                    if value == -1: return self.uid
+                    old, self.uid = self.uid, value; return old
+                def setfsgid(self, value):
+                    if value == -1: return self.gid
+                    old, self.gid = self.gid, value; return old
+            libc = Libc(); account = SimpleNamespace(pw_uid=1002, pw_gid=1002)
+            with patch("services.llm.bootstrap.supervisor.ctypes.CDLL", return_value=libc), \
+                 patch("services.llm.bootstrap.supervisor.pwd.getpwnam", return_value=account), \
+                 patch.object(daemon, "_proc_net_inode", return_value={7}), \
+                 patch("services.llm.bootstrap.supervisor.Path.iterdir", side_effect=PermissionError):
+                daemon.launch_user = True
+                self.assertFalse(daemon._owned_listener())
+            self.assertEqual((libc.uid, libc.gid), (77, 66))
+
+    def test_cross_uid_listener_probe_refused_transition_fails_closed(self):
+        with tempfile.TemporaryDirectory() as root:
+            daemon = self.supervisor(root)
+            daemon.process = SimpleNamespace(pid=os.getpid(), returncode=None)
+            daemon._fence = __import__("services.llm.bootstrap.supervisor", fromlist=["_fence"])._fence(os.getpid())
+            class Libc:
+                def __init__(self): self.uid, self.gid = 77, 66
+                def setfsuid(self, value):
+                    if value == -1: return self.uid
+                    old, self.uid = self.uid, value; return old
+                def setfsgid(self, value):
+                    if value == -1: return self.gid
+                    old, self.gid = self.gid, value; return old
+            libc = Libc(); account = SimpleNamespace(pw_uid=1002, pw_gid=1002)
+            original_setfsgid = libc.setfsgid
+            def refused(value):
+                if value == 1002: return 55
+                return original_setfsgid(value)
+            with patch("services.llm.bootstrap.supervisor.ctypes.CDLL", return_value=libc), \
+                 patch("services.llm.bootstrap.supervisor.pwd.getpwnam", return_value=account), \
+                 patch.object(daemon, "_proc_net_inode", return_value={7}), \
+                 patch.object(libc, "setfsgid", side_effect=refused):
+                daemon.launch_user = True
+                with self.assertRaises(OllamaSupervisorError): daemon._owned_listener()
+
+    def test_cross_uid_listener_probe_failed_restoration_fails_closed(self):
+        with tempfile.TemporaryDirectory() as root:
+            daemon = self.supervisor(root)
+            daemon.process = SimpleNamespace(pid=os.getpid(), returncode=None)
+            daemon._fence = __import__("services.llm.bootstrap.supervisor", fromlist=["_fence"])._fence(os.getpid())
+            class Libc:
+                def __init__(self): self.uid, self.gid = 77, 66; self.restoring = False
+                def setfsuid(self, value):
+                    if value == -1: return self.uid
+                    old, self.uid = self.uid, value; self.restoring |= value == 77; return old
+                def setfsgid(self, value):
+                    if value == -1: return 999 if self.restoring else self.gid
+                    old, self.gid = self.gid, value; return old
+            libc = Libc(); account = SimpleNamespace(pw_uid=1002, pw_gid=1002)
+            with patch("services.llm.bootstrap.supervisor.ctypes.CDLL", return_value=libc), \
+                 patch("services.llm.bootstrap.supervisor.pwd.getpwnam", return_value=account), \
+                 patch.object(daemon, "_proc_net_inode", return_value={7}), \
+                 patch("services.llm.bootstrap.supervisor.Path.iterdir", return_value=[]):
+                daemon.launch_user = True
+                with self.assertRaises(OllamaSupervisorError): daemon._owned_listener()
+
     async def test_repeated_cancelled_close_waits_for_one_cleanup(self):
         with tempfile.TemporaryDirectory() as root:
             daemon = self.supervisor(root)
@@ -417,3 +528,89 @@ while True:
                         await task
             await daemon.close()
             self.assertIsNone(daemon.process)
+
+    async def test_launch_user_parent_death_kills_gated_daemon_leader(self):
+        """PDEATHSIG covers the exec'd daemon leader, not detached children."""
+        with tempfile.TemporaryDirectory() as root:
+            # Adopt and reap the test-owned grandchild after killing its parent.
+            # /proc retains a zombie until a parent reaps it; zombie presence is
+            # not evidence that PDEATHSIG failed to stop the leader.
+            libc = ctypes.CDLL(None, use_errno=True)
+            if libc.prctl(36, 1, 0, 0, 0) != 0:
+                self.skipTest("test subreaper is unavailable")
+            port = _port()
+            parent = r'''
+import os, subprocess, sys, time
+fake = sys.argv[1]
+port = sys.argv[2]
+raw = open("/proc/self/stat", "rb").read()
+start = int(raw[raw.rfind(b")") + 2:].split()[19])
+child = subprocess.Popen([sys.executable, "-m", "services.llm.bootstrap.ollama_launcher",
+                          "--expected-parent", str(os.getpid()), str(start), "--",
+                          sys.executable, "-c", fake, port], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE)
+line = child.stdout.readline()
+sys.stdout.buffer.write(line); sys.stdout.buffer.flush()
+child.stdin.write(b"G"); child.stdin.flush(); child.stdin.close()
+time.sleep(30)
+'''
+            fake = ("import socket,sys,time; s=socket.socket(); s.bind(('127.0.0.1',int(sys.argv[1]))); "
+                    "s.listen(1); time.sleep(30)")
+            script = Path(root) / "parent.py"
+            script.write_text(parent)
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(Path(__file__).parents[2])
+            proc = subprocess.Popen([sys.executable, str(script), fake, str(port)],
+                                    stdout=subprocess.PIPE, env=env)
+            try:
+                assert proc.stdout is not None
+                record = json.loads(await asyncio.to_thread(proc.stdout.readline))
+                leader = record["pid"]
+                deadline = asyncio.get_running_loop().time() + 2
+                while True:
+                    try:
+                        probe = socket.create_connection(("127.0.0.1", port), timeout=.1)
+                        probe.close()
+                        break
+                    except OSError:
+                        if asyncio.get_running_loop().time() >= deadline:
+                            self.fail("test-owned daemon did not bind")
+                        await asyncio.sleep(.02)
+                os.kill(proc.pid, signal.SIGKILL)
+                await asyncio.to_thread(proc.wait, 2)
+                deadline = asyncio.get_running_loop().time() + 2
+                while asyncio.get_running_loop().time() < deadline:
+                    try:
+                        raw = (Path("/proc") / str(leader) / "stat").read_bytes()
+                        state = raw[raw.rfind(b")") + 2:].split()[0]
+                    except OSError:
+                        break
+                    if state == b"Z":
+                        try:
+                            os.waitpid(leader, os.WNOHANG)
+                        except ChildProcessError:
+                            pass
+                    else:
+                        await asyncio.sleep(.02)
+                        continue
+                    await asyncio.sleep(.02)
+                try:
+                    raw = (Path("/proc") / str(leader) / "stat").read_bytes()
+                    state = raw[raw.rfind(b")") + 2:].split()[0]
+                except OSError:
+                    state = None
+                self.assertNotEqual(state, b"Z", "test-owned subreaper did not reap dead leader")
+                self.assertIsNone(state, "PDEATHSIG left the test-owned daemon leader live")
+                with self.assertRaises(OSError):
+                    socket.create_connection(("127.0.0.1", port), timeout=.1)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    await asyncio.to_thread(proc.wait)
+                if 'leader' in locals() and Path("/proc", str(leader)).exists():
+                    try:
+                        os.kill(leader, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                if proc.stdout is not None:
+                    proc.stdout.close()

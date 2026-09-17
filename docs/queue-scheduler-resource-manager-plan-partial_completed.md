@@ -12,10 +12,115 @@ G0 (durable, truthful, capacity-aware asynchronous LLM work) and G1–G4 remain
 `partial`. **No leaf goal is done.** The evidence below is unit, local
 integration, synthetic, candidate-image, or locally run installed-adapter
 evidence. It is not a production deployment, measured capacity profile,
-qualifying production-boundary E2E. Phase 2 alone has met its local phase exit.
+qualifying production-boundary E2E. Phases 0, 2, 3 and 4 have met their respective
+contract, local acceptance and candidate exits.
 The evidence does not replace the compatibility procedure, real concurrent
 capacity sweep, production image acceptance, restart/failure E2E, or operations
 work in the [canonical plan](queue-scheduler-resource-manager-plan.md).
+
+## Phase 0 complete — Contracts and validated bindings
+
+Closed on 2026-09-17 against the contract-phase exit: settled optional-function
+polling/completed-response progress and acknowledged local publication; parsed
+OpenAPI and validated handwritten bindings; typed request/attempt/function,
+provisioner configuration, selected manifests and SQLite profile contracts;
+transition/invariant review; and an explicit owner/decision for all eight
+decision items. The [decision record](implementation-decisions.md) links the
+canonical source and invariant tests rather than duplicating schemas.
+
+The new ten-test acceptance module validates actual RM capacity/progress/error
+serializers and durable scheduler projections, the complete declared operation
+inventory, idempotency/body/cursor requirements and explicit future markers.
+Actual loopback checks validate scheduler SSE data, RM 429 backpressure,
+artifact verification success/hash mismatch, profile validation success/bad
+input, and health live/ready/dependencies including unready responses against
+OpenAPI. A negative test confirms malformed payload rejection. Independent
+contract/profile/artifact/bootstrap and HTTP suites supply behavioral evidence.
+
+Verification: **145 tests passed in 5.562s**, warnings treated as errors, using
+only task-related suites. The **10-test** acceptance module passed two additional
+runs (**0.310s, 0.311s**); targeted compilation and `git diff --check` passed.
+Fixtures own temporary SQLite/results/artifacts/profiles, fake providers,
+coordinator tasks and loopback services. Exact commands and stable tests are in
+the [proof inventory](../.opencode/skills/goal-oriented-design/references/e2e-proof.md#phase-0-contract-closure-2026-09-17).
+
+This supports G1.1/G1.2/G2.1/G2.2/G3.1/G3.2/G4.1/G4.2/G4.3 under G0 without
+promoting any beyond `partial`. Phase 1 still owns complete compatibility and
+pin approval; Phase 5 owns measured provisioning; Phase 6 owns operator backup/
+retention, deployment and qualifying E2E. No automatic deletion, invented hashes,
+synthetic-profile promotion or implementation of future capacity/measurement/
+metrics operations is implied by contract closure.
+
+## Phase 4 continuation — Local exit and exact GPU candidate complete
+
+Fresh exact candidate image
+`sha256:da9b047a4394cdd91d565ee00c288e244ec5c12655229c9c8465830e9c9b0d1f`
+completed SmolLM → CoEdIT → GECToR → SmolLM with three cleanup-gated
+switches, cancellation and stale-authority fencing, six stable-total memory
+points, final used-memory restoration to baseline, and verified owned-container
+cleanup. The profile remains unmeasured; this is candidate evidence, not
+production deployment or capacity proof.
+
+The completed candidate above supersedes the intermediate blocked runs below.
+Phase 4's local/candidate exit is complete, supporting G2.1/G2.2/G4.1/G4.2 under
+G0 without promoting any leaf beyond `partial`. The following is historical
+implementation and failure-diagnostic evidence, not a current blocker.
+
+- The bounded CoEdIT transition-1 fallback now treats only typed expected-runner
+  absence as eligible for fallback. It retains exact worker PID/start-time and
+  CUDA/NVML witness checks, the captured supervisor/device fence, a valid
+  pre-load whole-device point, and two ordered post-load points. Point-in-time
+  used/free fluctuation is allowed, but GPU/supervisor/total-memory identity must
+  be immutable and each post-load used value must exceed baseline. This is local
+  implementation and regression coverage only; no GPU candidate run was performed
+  or promoted by this change.
+
+- Fixed phantom validation reservations left by accepted-pair replay; concurrent
+  same-attempt validators now share identity-checked reference accounting.
+  Conflicting inputs cannot replace that identity, and a failed/cancelled
+  validator releases only its own reference.
+- Kept validation ownership through the final admission lock. Cancellation
+  fences all overlapping validating, buffered and active ownership and invokes
+  advisory cancellation for active work. Active-only cancellation does not emit
+  a premature terminal event: the actual late response retains completed-response
+  progress with exact identity and no publishable result.
+- Known retired start replay fails promptly without waiting behind replacement
+  cleanup. Existing lifecycle serialization still owns new starts.
+- Local acceptance invokes real SmolLM/CoEdIT/GECToR constructors and lifecycle
+  methods with a test-owned selected-artifact volume, loopback Ollama and
+  controlled worker/GPU seams. SmolLM CLI import/input-bound checks are patched
+  here and independently covered by provider suites. This is not GPU inference.
+  Separate acceptance proves p=2 plus m=2, exact accepted replay, backpressure
+  retry and stale controls while replacement cleanup is gated. The two former
+  acceptance gaps are closed: one composed case proves failed cleanup rejects
+  submit/cancel/capacity controls and grants no replacement authority; another
+  proves a real local adapter's late completion after cancellation is collected
+  without publishing a result.
+
+Verification: **176 tests passed in 9.248s**, warnings treated as errors, with
+only task-related suites. The four-test acceptance module passed three additional
+runs in **0.234s, 0.237s and 0.236s**. Targeted compilation and whitespace checks
+passed. Cleanup diagnostics preserve the primary transition failure and report
+only bounded categories. Cleanup disappearance and post-load residency use
+bounded 5-second/200-ms observational settlement; persistent or uncertain proof
+still fails closed. Stable commands and test IDs are in the proof inventory.
+
+The final current-source adapter image built with `--network none`; RepoDigest:
+`llm-compatibility-adapter@sha256:2a02467c1f1e60e6445109fd65ff1ec813817c5b193103dd51067201c2b76e1c`.
+Instrumentation localized the former ambiguous cleanup failure to transition 1,
+SmolLM → CoEdIT. The pre-load proof initially observed the prior owned runner;
+bounded settlement now handles that teardown lag without weakening ownership.
+The final offline GPU run advanced through that gate but failed closed during
+CoEdIT `start_session` after the bounded post-load settlement with `GPU has no
+resident runner`. No passing JSON summary or later-model evidence was emitted.
+
+The tester verified owned container `llm-phase4-three-model-check` absent after
+each bounded run; no foreign GPU workload was controlled. The remaining blocker
+is now the real CoEdIT worker's absent positive NVML residency evidence after the
+five-second bound, not an unidentified cleanup transition or masked stale-session
+error. Operator/runtime investigation is required before another GPU run; a
+devcontainer rebuild is still not justified by this evidence. Earlier candidate
+passes remain historical evidence, not a substitute for a current passing run.
 
 ## Phase 2 complete — Durable queue core
 
@@ -57,9 +162,53 @@ loopback HTTP resources, including registered failure-path cleanup.
 
 This is **unit/local integration evidence**, with the real RM HTTP/core but a
 synthetic provider and profile. It does not prove RM-process crash persistence,
-real GPU/deployed restart, complete Phase 3 scheduler interactions, measured
+real GPU/deployed restart, measured
 capacity, or Phase 6 production E2E. G1.1/G1.2/G2.1/G2.2/G3.1/G3.2 remain
 `partial`; closing this implementation phase does not weaken those targets.
+
+## Phase 3 complete — QueueScheduler behavior
+
+Closed on 2026-09-17 against the deterministic scheduler transition and
+insertion/eligibility exit. The new acceptance module exercises the actual
+QueueScheduler, SQLite queue, local publisher and in-process ResourceManager
+with synthetic providers; independent contract, store, evaluator, HTTP and
+Phase 2 recovery suites supply operation guards and exhaustive adjacency/order
+cases rather than duplicating them in every scheduler scenario.
+
+- Six-status lifecycle and complete/incomplete GPU timing, duplicate/stale
+  callback fences and publication-before-done retain truthful outcomes.
+- Cancellation covers decoding, uncertain submission, buffered/on-GPU work and
+  pending handoff; terminal replays cannot revive work. Idle, non-retryable
+  failure and RM session invalidation abort active, blocked and retry-delayed work.
+- Provider-failure retry uses persisted wall time with 5/10/20/30-second backoff
+  and exhaustion; backpressure retains the original attempt without spending
+  retry budget. Watchdog elapsed time remains monotonic and only a new finished
+  provider response resets it, including a fenced late response.
+- Bounded scans restart after awaited readiness invalidation. Dependency/template
+  gates, missing-function recovery, grouped concurrent skip-line dispatch and
+  independent anchor/retry/no-anchor guards establish predictable eligible order.
+- Fixed scheduler polling to honor configured reevaluation cadence without
+  throttling successive eligible claims. Cached capabilities are fenced by
+  durable queue version and evaluator invalidation, and positive readiness
+  expires on the poll deadline even without a durable mutation.
+- Fixed stale finished-result cleanup to remove exact attempt ownership without
+  requiring a separate cancellation event. Cancelled output cannot publish or
+  leave an otherwise empty scheduler's watchdog armed indefinitely.
+
+Verification: **150 passed in 9.765s**, warnings treated as errors. The 14-test
+acceptance module additionally passed three runs in **1.491s, 1.473s and 1.485s**.
+Targeted compilation and whitespace checks passed. Independent review found no
+remaining defect for the local phase exit; its recovery-order documentation
+correction is incorporated. Stable commands and test IDs are in the
+[proof inventory](../.opencode/skills/goal-oriented-design/references/e2e-proof.md#phase-3-queuescheduler-completion-2026-09-17)
+and [transition evidence map](../services/llm/queue/transition_table.md#stable-phase-3-evidence-map).
+Fixtures own temporary databases/results, threads, tasks and HTTP resources;
+some narrow callback/cache tests deliberately drive internal coordination seams.
+
+This completes the implementation/local phase, not production-boundary proof.
+No measured profile, GPU/deployed lifecycle, arbitrary RM event permutation or
+new process-crash boundary is claimed. Existing Phase 2 subprocess/HTTP recovery
+remains independent evidence. G1.1/G1.2/G2.1/G2.2/G3.1/G3.2 remain `partial`.
 
 ## Historical contract and queue slices
 
@@ -86,8 +235,8 @@ capacity, or Phase 6 production E2E. G1.1/G1.2/G2.1/G2.2/G3.1/G3.2 remain
   ready/template execution, dependency result resolution, and single-use
   durable version/session/intent-fenced claim capabilities.
 
-These slices support the completed Phase 2 exit above. Remaining Phase 0/3
-contracts and scheduler coverage, and production-boundary proof, remain open.
+These slices support the completed Phase 0/2/3 exits above. Later compatibility,
+measured provisioning and production-boundary proof remain open.
 
 ## Transport and lifecycle boundaries
 
@@ -229,8 +378,9 @@ deployment, measured capacity, or qualifying E2E.
 Historical focused suites and commands remain in the linked boundary documents,
 including [three-model GPU evidence](three-model-adapter-gpu-check.md) and
 [implementation decisions](implementation-decisions.md). They support the
-bounded claims above only. Follow-up maps to the canonical plan's open Phase 0
-through Phase 6 exits: compatibility and production image, real RM/scheduler
+bounded claims above only. Follow-up maps to the canonical plan's open Phases
+1, 5 and 6: compatibility and approved production image, deployed RM/scheduler
 integration and recovery, concurrent/native-batch measurement and profile
 selection, offline bootstrap acceptance, production E2E, observability,
-deployment, and runbooks. No listed evidence changes those open requirements.
+deployment, and runbooks. Contract and local exits for Phases 0/2/3 and the
+Phase 4 local/candidate exit do not waive those remaining requirements.

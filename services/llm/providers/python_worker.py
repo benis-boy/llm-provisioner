@@ -27,7 +27,7 @@ def _read(stream, gector=False):
     try: value=json.loads(bytes(data).decode("utf-8"), object_pairs_hook=_pairs, parse_constant=lambda _: (_ for _ in ()).throw(ValueError("non-finite JSON")))
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc: raise RuntimeError("malformed RPC request") from exc
     if not isinstance(value,dict) or type(value.get("id")) is not int or not 1 <= value["id"] <= MAX_RPC_ID or not isinstance(value.get("op"),str): raise RuntimeError("malformed RPC request")
-    allowed={"load":{"id","op"},"gpu_identity":{"id","op"},"shutdown":{"id","op"},"validate":{"id","op","instruction","texts"},"execute":{"id","op","instruction","texts"},"execute_batch":{"id","op","items"},"benchmark_input":{"id","op","instruction","text","generate"}}
+    allowed={"load":{"id","op"},"cuda_ready":{"id","op"},"cuda_residency":{"id","op"},"gpu_identity":{"id","op"},"shutdown":{"id","op"},"validate":{"id","op","instruction","texts"},"execute":{"id","op","instruction","texts"},"execute_batch":{"id","op","items"},"benchmark_input":{"id","op","instruction","text","generate"}}
     if gector: allowed.update({"validate":{"id","op","texts","keep_confidence","min_error_prob","n_iteration","batch_size"},"execute":{"id","op","texts","keep_confidence","min_error_prob","n_iteration","batch_size"}}); allowed.pop("execute_batch", None); allowed.pop("benchmark_input", None)
     if value["op"] not in allowed or set(value)!=allowed[value["op"]]: raise RuntimeError("malformed RPC request")
     return value
@@ -36,13 +36,45 @@ def _write(value):
     if len(data)>MAX_FRAME: raise RuntimeError("RPC response exceeds bound")
     _PROTOCOL.write(struct.pack(">I",len(data))+data); _PROTOCOL.flush()
 class Runtime:
-    def __init__(self,root,config): self.root,self.config,self.tokenizer,self.model=root,config,None,None
+    def __init__(self,root,config): self.root,self.config,self.tokenizer,self.model,self._cuda_residency_witness=root,config,None,None,None
     def load(self):
         import torch
         from transformers import AutoTokenizer,T5ForConditionalGeneration
         self.tokenizer=AutoTokenizer.from_pretrained(self.root,local_files_only=True,trust_remote_code=False)
         dtype={"float16":torch.float16,"bfloat16":torch.bfloat16,"float32":torch.float32}[self.config["dtype"]]
         self.model=T5ForConditionalGeneration.from_pretrained(self.root,local_files_only=True,trust_remote_code=False,use_safetensors=True,torch_dtype=dtype).to(torch.device("cuda:0")); self.model.eval()
+    def cuda_ready(self):
+        """Retain a synchronized CUDA allocation for this loaded worker's lifetime."""
+        import torch
+        if self.model is None: raise RuntimeError("model is not loaded")
+        cuda = getattr(torch, "cuda", None)
+        synchronize = getattr(cuda, "synchronize", None)
+        zeros = getattr(torch, "zeros", None)
+        if not callable(zeros) or not callable(synchronize):
+            raise RuntimeError("CUDA readiness operation is unavailable")
+        witness = zeros((1,), device="cuda:0")
+        if witness is None:
+            raise RuntimeError("CUDA readiness allocation is unavailable")
+        synchronize()
+        # A temporary tensor is decref'd when this RPC returns and consequently
+        # cannot be evidence of continuing model-worker residency. Keep one
+        # bounded device allocation owned by this loaded Runtime until worker
+        # exit; the resident model and this witness therefore share exactly the
+        # worker process which GPU ownership later proves.
+        self._cuda_residency_witness = witness
+        return True
+    def cuda_residency(self):
+        """Return a scalar witness that is checked on every readiness sample."""
+        import torch
+        witness = self._cuda_residency_witness
+        if self.model is None or witness is None:
+            raise RuntimeError("CUDA residency witness is unavailable")
+        device = getattr(witness, "device", None)
+        model_device = next(self.model.parameters()).device
+        if str(device) != "cuda:0" or str(model_device) != "cuda:0":
+            raise RuntimeError("CUDA residency device mismatch")
+        return {"model_cuda_device":"cuda:0", "witness_exists":True,
+                "witness_cuda_device":"cuda:0"}
     @staticmethod
     def _physical_uuid(value):
         if isinstance(value,bytes):
@@ -259,6 +291,8 @@ def main(runtime_class=Runtime, gector=False):
         try:
             op=request["op"]
             if op == "load": value=runtime.load() or True
+            elif op == "cuda_ready": value=runtime.cuda_ready()
+            elif op == "cuda_residency": value=runtime.cuda_residency()
             elif op == "gpu_identity": value=runtime.gpu_identity()
             elif op == "validate":
                 value = (runtime.validate(**{k:request[k] for k in request if k not in {"id","op"}}) if gector else runtime.validate(request.get("instruction"),request.get("texts")))

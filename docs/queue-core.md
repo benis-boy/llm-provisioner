@@ -117,5 +117,7 @@ subprocesses and loopback services. The [completion record](queue-scheduler-reso
 maps the phase exit and limits. The store's acknowledgment method remains a trusted
 publisher boundary; real publication verifies bytes before invoking it. Storage
 guard tests may supply synthetic digests and are not proof of result availability.
-Complete Phase 3 scheduler interaction coverage and production provider/deployment
-proof remain open; no product goal is promoted by this local phase exit.
+Phase 3 scheduler interaction acceptance is now also complete; see its
+[completion record](queue-scheduler-resource-manager-plan-partial_completed.md#phase-3-complete--queuescheduler-behavior).
+Production provider/deployment proof remains open; no product goal is promoted
+by these local phase exits.

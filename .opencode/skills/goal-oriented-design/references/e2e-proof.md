@@ -2,11 +2,160 @@
 
 ## Current status
 
+Fresh exact candidate image
+`sha256:da9b047a4394cdd91d565ee00c288e244ec5c12655229c9c8465830e9c9b0d1f`
+completed SmolLM → CoEdIT → GECToR → SmolLM with three switches,
+`cancel_fenced=true`, `stale_rejected=true`, six stable-total memory points,
+final used-memory restoration to baseline, and verified owned-container
+cleanup. The profile remains unmeasured and this is candidate evidence, not
+qualifying production deployment or capacity proof.
+
 G1.1 through G4.3 are **partial**: SQLite queue/result primitives, bounded
 optional-function evaluation, an async scheduler, a transport-neutral RM and
 candidate offline tooling exist. Real production provider/server boundaries,
 measured profiles and production packaging remain incomplete.
 No qualifying production-boundary E2E proof exists and no leaf is done.
+
+## Phase 0 contract closure (2026-09-17)
+
+**Unit/local integration**, supporting G1.1/G1.2/G2.1/G2.2/G3.1/G3.2/G4.1/G4.2/
+G4.3 under G0: durable accepted work, acknowledged fenced results, truthful
+progress/intervention, predictable eligible ordering, safe owned service and
+bounded offline exact-identity admission. Phase 0's contract exit is complete;
+all goal leaves remain `partial`, with qualifying production-boundary proof open.
+
+`tests.integration.test_phase0_contract_acceptance.Phase0ContractAcceptanceTests`:
+
+- `test_production_rm_serializers_validate_nullable_progress_and_capacity` and
+  `test_actual_scheduler_projection_and_rm_error_validate`: actual production
+  serializer/projection output matches declared schemas, including null timing.
+- `test_complete_operation_inventory_future_set_and_post_contracts` and
+  `test_error_and_sse_response_media_types_are_declared`: complete declared
+  inventory, idempotency/body/cursor/media contracts and exact future markers.
+- `test_actual_scheduler_sse_frame_validates_with_durable_cursor`: real loopback
+  SSE data uses the durable request schema and numeric event IDs.
+- `test_actual_rm_backpressure_response_validates_as_submission`: full p+p
+  admission returns typed HTTP 429, not a malformed-reference error.
+- `test_actual_provisioning_success_and_failure_responses_validate` and
+  `test_actual_profile_validation_success_and_failure_responses_validate`:
+  actual integrity and exact-profile endpoints return schema-conformant
+  success and rejection envelopes.
+- `test_actual_health_success_failure_and_dependency_responses_validate`:
+  loopback liveness/readiness/dependencies, including startup HTTP 503.
+- `test_schema_validator_rejects_invalid_payload`: negative validation control.
+
+Independent contract, profile, artifact-volume, bootstrap-binding and HTTP
+suites cover behavioral guards; the new module is not exhaustive status/error
+or production E2E proof. Fixtures own temporary SQLite/results/artifacts/profiles,
+fake providers, tasks and loopback server cleanup. No GPU or deployment run is
+required for this contract-only change, and none is claimed.
+
+Focused command (no full discovery):
+
+```sh
+.venv/bin/python -W error -m unittest -v tests.integration.test_phase0_contract_acceptance tests.unit.test_openapi_validation tests.unit.test_contracts tests.unit.test_profile_contracts tests.unit.test_profiles tests.unit.test_artifact_volume tests.unit.test_bootstrap_bindings tests.integration.test_profile_validation_http tests.integration.test_provisioning_http tests.integration.test_resource_manager_http tests.integration.test_scheduler_http tests.unit.test_health_http
+```
+
+**145 passed in 5.562s**. Command
+`.venv/bin/python -W error -m unittest -v tests.integration.test_phase0_contract_acceptance`
+also passed **10 tests** twice (**0.310s, 0.311s**). Targeted compilation and
+`git diff --check` passed. Phase 1 compatibility/pin approval, Phase 5 measured
+provisioning, and Phase 6 backup/deployment/E2E remain gates; no synthetic
+profile, future endpoint or candidate image is promoted by this closure.
+
+## Historical Phase 4 local continuation and blocked GPU verification (2026-09-17)
+
+The successful exact candidate in Current status supersedes the blocked GPU
+runs recorded in this section; they are not current blockers.
+
+**Unit/local integration**, G2.1/G2.2/G4.1/G4.2 under G0: truthful completion,
+safe cancellation, fenced owned service and bounded admission. Phase 4's local
+exit is complete; all touched product goals remain `partial`.
+
+- `tests.integration.test_phase4_acceptance.Phase4ResourceManagerAcceptance.test_real_adapter_lifecycles_switch_only_after_cleanup`:
+  real adapter orchestration with selected artifacts, loopback Ollama and
+  controlled worker/GPU seams; successful responses retain request/attempt
+  identity, completion sequence and explicit null/incomplete GPU timing.
+- `test_p2_plus_p2_retry_and_stale_replacement_controls` in that class: two active
+  plus two buffered, exact accepted replay, rejected work does not execute,
+  same-key retry after capacity release, prompt stale start/submit/cancel/capacity
+  rejection during gated replacement.
+- `test_failed_cleanup_fences_old_controls_without_replacement_authority` composes
+  failed cleanup with rejected retired submit/cancel/capacity controls and no new
+  authority. `test_actual_adapter_late_completion_after_cancel_is_not_published`
+  collects a real local CoEdIT adapter completion after cancellation while exposing
+  only the cancelled terminal event and no result.
+- `tests.unit.test_resource_manager.ResourceManagerTests`:
+  `test_replay_does_not_leave_validation_reservation`,
+  `test_concurrent_same_attempt_validation_keeps_cancellation_fenced`,
+  `test_conflicting_duplicate_validator_cannot_replace_marker`,
+  `test_failed_duplicate_validator_preserves_survivor_reservation_for_cancel`,
+  `test_cancelled_wait_for_final_admission_releases_reservation`, and
+  `test_cancel_validation_and_active_work_fences_late_result_and_calls_provider`
+  cover replay/immutable identity, overlapping validators, exactly-once release
+  after asymmetric validation failure, final-lock task cancellation and concurrent
+  validating/active ownership with advisory cancellation and suppressed results.
+- Existing provider, RM shutdown/HTTP, three-model harness and Phase 3 suites
+  independently cover lifecycle errors, cleanup, progress and publication fences.
+  Fixtures own temporary artifact roots, loopback servers, tasks and gates;
+  synthetic GPU/worker evidence is not production-boundary proof.
+
+The local transition-1 CoEdIT fallback contract is also covered by focused
+regressions: typed expected-runner absence only, exact worker identity and
+retained CUDA witness, fenced supervisor/device identity, valid baseline, and
+two ordered post-load observations with stable immutable identity and positive
+used-memory effect. These tests are unverified pending independent tester
+execution; they are not GPU candidate evidence and do not advance a goal.
+
+Focused command (no full discovery):
+
+```sh
+.venv/bin/python -W error -m unittest -v tests.integration.test_phase4_acceptance tests.unit.test_resource_manager tests.unit.test_resource_manager_shutdown tests.unit.test_smollm_provider tests.unit.test_coedit_provider tests.unit.test_gector_provider tests.unit.test_three_model_adapter_check tests.unit.test_gpu_proof tests.integration.test_phase3_acceptance tests.integration.test_resource_manager_http
+```
+
+**176 passed in 9.248s**. Additional command
+`.venv/bin/python -W error -m unittest -v tests.integration.test_phase4_acceptance`
+passed **4 tests** three times (0.234s, 0.237s, 0.236s). Targeted compilation and
+`git diff --check` passed. No final warnings reported.
+
+**E2E candidate — failed/blocked**, not qualifying proof: current source built
+offline into `llm-compatibility-adapter:phase4`, RepoDigest
+`llm-compatibility-adapter@sha256:2a02467c1f1e60e6445109fd65ff1ec813817c5b193103dd51067201c2b76e1c`.
+The documented three-model command (tag `:phase4`, owned container
+`llm-phase4-three-model-check`) on GPU
+`GPU-d15a7ff9-a19b-3ece-7510-759a0bca1963` now identifies transition 1,
+SmolLM → CoEdIT. Bounded pre-load settlement clears the former owned-runner
+cleanup lag, but the final run fails during CoEdIT `start_session` with `GPU has
+no resident runner` after bounded post-load settlement. No passing result/manifest
+projection was emitted. The tester verified its container absent. The temporary
+CUDA allocation used by that build was not retained after `cuda_ready` returned;
+the source now retains a bounded worker-lifetime allocation and requires rebuild.
+The retained-witness rebuild instead observed runners but no generic owned
+identity (image `sha256:8fc0ab1008fc84878e4f28b426b1a3ea1639745db671d8b26a7601bc11605222`);
+the source now sends the exact worker identity through an expected-runner,
+category-only proof diagnostic. The precise failed relation remains unestablished
+pending the next candidate run. See the
+[bounded ledger](../../../../docs/queue-scheduler-resource-manager-plan-partial_completed.md#phase-4-continuation--local-fences-verified-gpu-check-blocked).
+
+**Latest superseding initial-load evidence:** this platform's NVML process API
+reported only two unchanged procfs-unmappable baseline graphics IDs while the
+private Ollama endpoint reported the exact SmolLM model fully in VRAM and procfs
+proved the fenced Python supervisor → owned daemon → owned runner topology. A
+narrow SmolLM-only fallback now requires that topology and exact private model
+state to remain stable across two observations, plus matching fenced pre/post GPU
+memory identity and a positive used-memory increase. It grants no authority over
+the baseline NVML IDs. Focused verification passed **183 tests**; compilation and
+whitespace checks passed. Fresh offline image manifest-list digest:
+`sha256:7c8015b8e989414e6af74254211c4247377b48d6674a8f7e529e719d6f660d8e`
+(image manifest `sha256:661783d3baf6b3c0202dc98e98549cf957217edbf5e0d3acf68f7fcc9700e0f9`).
+The exact candidate completed transition 0 SmolLM start/readiness, a valid response,
+model-specific residency acceptance, and memory observation before failing at
+transition 1 CoEdIT exact-worker proof (`exact_child=0`,
+`strict_supervisor_descendant=0`, `foreign_or_baseline=1`,
+`unreadable_or_unconnectable=1`, `identity_mismatch=0`). Its owned container was
+verified absent. This establishes initial SmolLM loading for this candidate only;
+the full switch and production-boundary proof remain incomplete, so G0/G4.1/G4.3
+remain **partial**.
 
 ## Phase 2 durable queue core completion (2026-09-17)
 
@@ -57,6 +206,52 @@ passed all **8 tests** three times (0.437s, 0.449s, 0.447s). Targeted compilatio
 and whitespace checks passed. Independent final review found no remaining local
 Phase 2 defect. These results supersede the historical queue-core claims of no
 actual RM reconciliation; they do not supersede the production-proof gaps.
+
+## Phase 3 QueueScheduler completion (2026-09-17)
+
+**Unit/local integration**, G1.1/G1.2/G2.1/G2.2/G3.1/G3.2 under G0: accepted
+work stays recoverable, terminal results are acknowledged and fenced, progress
+and intervention remain truthful, and eligible append/skip-line work dispatches
+predictably. Phase 3's implementation/local exit is complete; all leaves remain
+**partial**, without qualifying production-boundary E2E.
+
+- `tests.integration.test_phase3_acceptance.Phase3SchedulerAcceptance` contains
+  14 scenarios: complete/incomplete timing, callback fences, cancellation across
+  dispatch/publication stages, idle/non-retryable/session-invalidated abort,
+  retry/backpressure, resumed readiness scans, missing-function recovery and
+  concurrent grouped skip-line execution order. The
+  [stable evidence map](../../../../services/llm/queue/transition_table.md#stable-phase-3-evidence-map)
+  maps exact test titles to the independent adjacency/store/recovery tests.
+- `tests.unit.test_scheduler.SchedulerIntegrationTests.test_optional_function_poll_cadence_and_local_enqueue_wake`,
+  `test_large_function_poll_interval_does_not_delay_armed_watchdog`,
+  `test_large_poll_dispatches_two_ready_requests_without_per_request_delay`,
+  `test_independent_mutation_discards_cached_capability_for_new_head`, and
+  `test_positive_cache_expires_and_rescans_external_readiness` establish bounded
+  polling, version/invalidation fencing and external readiness expiry without
+  throttling successive eligible requests.
+- `test_late_finished_result_without_cancel_event_cleans_watchdog_ownership` in
+  that same scheduler class verifies exact stale-attempt cleanup and the required
+  finished-response reset even when cancelled output cannot publish.
+- Phase 2 acceptance and independent contract/store/evaluator/regression suites
+  retain exhaustive adjacency, operation guards, anchor retry/cancellation and
+  no-anchor fallback, recovery, and durable publication evidence. Scheduler/RM
+  HTTP suites independently exercise lifecycle and replay through loopback.
+
+Fixtures own temporary SQLite/results/receipts, worker threads, coordinator
+tasks and loopback services. Providers/profiles are synthetic; internal cache
+and callback tests are narrow unit evidence, not production transport E2E.
+
+Focused command (no full discovery):
+
+```sh
+.venv/bin/python -W error -m unittest -v tests.integration.test_phase3_acceptance tests.integration.test_phase2_acceptance tests.unit.test_scheduler tests.unit.test_scheduler_operations tests.unit.test_eligibility tests.unit.test_queue_regressions tests.unit.test_store tests.unit.test_contracts tests.integration.test_scheduler_http tests.integration.test_resource_manager_http
+```
+
+**150 passed in 9.765s**. Command
+`.venv/bin/python -W error -m unittest -v tests.integration.test_phase3_acceptance`
+also passed **14 tests** three times (1.491s, 1.473s, 1.485s). Targeted compilation
+and whitespace checks passed. Production GPU/deployment, measured capacity and
+additional process-crash boundaries remain outside this local completion.
 
 ## Historical local regression inventory (2026-09-17)
 
@@ -782,3 +977,37 @@ Commands and boundaries: [foundation](../../../../docs/production-image-foundati
 This is not provider/GPU serving or qualifying deployment E2E. OS packages still
 come from live apt repositories, and distinct-user supervision remains absent.
 G4.1/G4.3 and parent G0 remain **partial**.
+
+## Distinct-user broker boundary continuation (2026-09-17)
+
+G0/G2.2/G4.1/G4.3 **unit/local integration**: focused broker/client/supervisor,
+deployment/runtime/HTTP and retained-harness suites passed **58 in 20.367s**.
+Tests own fake brokers, temporary procfs/socket/stat seams and child processes;
+the parent-loss regression subreaps only its own adopted daemon leader.
+Stateful tests assert paired filesystem UID/GID restoration order after success
+and denied access, and fail-closed transition/restoration failures. Bounded protocol/EOF handling and
+leader parent-death fencing are local evidence, not arbitrary runner containment.
+
+**e2e candidate boundary**: `tests/integration/test_image_broker_boundary.py`
+is executed as a standalone script via stdin to the real image (not unittest
+discovery). Final CPU and selected-GPU-exposed runs passed with network disabled,
+default app `llm` UID1001, broker UID tuple `(1001,0,0,0)`, daemon `ollama`
+UID/GID1002, version0.11.6, loopback-only listener, duplicate rejection,
+hostile environment/cwd isolation, checked path ownership and EOF-driven
+broker/daemon disappearance. The harness closes its clients in `finally`;
+runner cleanup owns only `llm-phase1-broker-boundary-cpu` and
+`llm-phase1-broker-boundary-gpu`. The final credential-assertion correction was
+verified by these real runs; the subsequent 58-test run strengthened restoration
+coverage and verified both owned container names absent, without an image rerun.
+
+Image manifest:
+`sha256:58c319fe8d5362d1982f3a3c8cb9fec4e295faecfddee1574c3be8d4b593be3f`.
+Exact commands and release gates:
+[broker boundary](../../../../docs/production-image-foundation.md#distinct-user-broker-continuation-2026-09-17).
+
+This supersedes historical absence of distinct-user startup evidence, not the
+open deployment proof. No NVML query, inference, model residency, host-PID
+Compose run, broker-loss descendant containment or adversarial import-tree
+immutability proof was performed. Complete privileged path hardening, reviewed
+Section7 compatibility, measured profiles and OS snapshot pins remain gates.
+All touched goals stay **partial**; no full suite was run.

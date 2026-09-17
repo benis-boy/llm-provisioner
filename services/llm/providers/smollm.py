@@ -17,7 +17,8 @@ from services.llm.provisioning.volume import verify_current
 from services.llm.resource_manager.contracts import CapacityProfile
 from services.llm.resource_manager.protocol import ProviderResponse
 from .config import SmolLMProviderConfig
-from .gpu import ProcessIdentity, ResidencyEvidence
+from .gpu import (GPUMemoryObservation, OwnedOllamaSnapshot, ProcessIdentity,
+                  ResidencyEvidence, _ResidencyPending, settle_residency)
 from .input_bounds import (SMOLLM_MAX_RAW_BYTES, frame_smollm_prompt,
                            validate_smollm_input)
 
@@ -40,10 +41,14 @@ class SmolLMProvider:
         self._profile: CapacityProfile | None = None
         self._cleanup_verified = False
         self._ready = False
+        self._preload_memory: GPUMemoryObservation | None = None
+        self._model_specific_ready = False
         # Keep the clock and wait operation injectable so cleanup polling can
         # be tested without making the bounded wait real-time.
         self._absence_clock = time.monotonic
         self._absence_sleep = asyncio.sleep
+        self._residency_clock = time.monotonic
+        self._residency_sleep = asyncio.sleep
 
     @property
     def _url(self) -> str:
@@ -65,14 +70,15 @@ class SmolLMProvider:
         proof = self.config.gpu_proof
         if proof is None or proof.residency is None or proof.expected_supervisor is None:
             raise RuntimeError("GPU residency proof is unavailable")
-        value = await self._resolve(proof.residency())
+        value = await settle_residency(proof.residency, sleep=self._residency_sleep,
+                                       monotonic=self._residency_clock)
         if type(value) is not ResidencyEvidence:
             raise RuntimeError("GPU residency proof is invalid")
         if value.gpu_uuid != self.config.gpu_uuid:
             raise RuntimeError("GPU residency identity mismatch")
         supervisor = value.supervisor
         expected = proof.expected_supervisor
-        if type(supervisor) is not ProcessIdentity or type(supervisor.pid) is not int or supervisor.pid <= 0 or type(supervisor.start_time) is not int or supervisor.start_time < 0:
+        if type(supervisor) is not ProcessIdentity or type(supervisor.pid) is not int or supervisor.pid <= 0 or type(supervisor.start_time) is not int or supervisor.start_time <= 0:
             raise RuntimeError("GPU supervisor identity proof is invalid")
         if type(expected) is not ProcessIdentity or supervisor != expected:
             raise RuntimeError("GPU supervisor identity mismatch")
@@ -81,11 +87,95 @@ class SmolLMProvider:
             raise RuntimeError("GPU runner residency proof is invalid")
         for runner in runners:
             if (type(runner) is not ProcessIdentity or type(runner.pid) is not int or runner.pid <= 0 or
-                    type(runner.start_time) is not int or runner.start_time < 0 or runner.pid == supervisor.pid):
+                    type(runner.start_time) is not int or runner.start_time <= 0 or runner.pid == supervisor.pid):
                 raise RuntimeError("GPU runner residency proof is invalid")
         if len({runner.pid for runner in runners}) != len(runners):
             raise RuntimeError("GPU runner residency proof is invalid")
         return value
+
+    async def _memory(self) -> GPUMemoryObservation:
+        if self.config.gpu_proof is None or self.config.gpu_proof.memory is None:
+            raise RuntimeError("GPU memory proof is unavailable")
+        value = await self._resolve(self.config.gpu_proof.memory())
+        if type(value) is not GPUMemoryObservation:
+            raise RuntimeError("GPU memory proof is invalid")
+        fields = (value.start_ns, value.end_ns, value.total_bytes, value.used_bytes, value.free_bytes)
+        if (any(type(item) is not int for item in fields) or value.start_ns > value.end_ns or
+                value.total_bytes <= 0 or value.used_bytes < 0 or value.free_bytes < 0 or
+                value.used_bytes > value.total_bytes or value.free_bytes > value.total_bytes or
+                value.used_bytes + value.free_bytes > value.total_bytes):
+            raise RuntimeError("GPU memory proof is malformed")
+        expected = self.config.gpu_proof.expected_supervisor
+        if value.gpu_uuid != self.config.gpu_uuid or value.supervisor != expected:
+            raise RuntimeError("GPU memory identity mismatch")
+        return value
+
+    async def _resident_model(self) -> tuple[str, int, int]:
+        """Read and validate the exact private endpoint model state."""
+        assert self._session is not None and self._model is not None
+        async with self._session.get("/api/ps", allow_redirects=False) as response:
+            if response.status != 200:
+                raise RuntimeError("Ollama residency check failed")
+            data = await self._json(response)
+        models = data.get("models") if isinstance(data, dict) else None
+        if not isinstance(models, list) or len(models) != 1 or not isinstance(models[0], dict):
+            raise RuntimeError("Ollama residency is not exclusively owned")
+        item = models[0]
+        name, size, size_vram = item.get("name"), item.get("size"), item.get("size_vram")
+        if (name != self._model + ":latest" or type(size) is not int or
+                type(size_vram) is not int or size <= 0 or size_vram != size):
+            raise RuntimeError("intended model is not fully resident on GPU")
+        return name, size, size_vram
+
+    @staticmethod
+    def _validate_owned_snapshot(value, expected_supervisor: ProcessIdentity) -> OwnedOllamaSnapshot:
+        if type(value) is not OwnedOllamaSnapshot:
+            raise RuntimeError("Ollama ownership proof is invalid")
+        identities = (value.supervisor, value.daemon, *value.descendants)
+        if value.broker is not None:
+            identities = (value.supervisor, value.broker, value.daemon, *value.descendants)
+        for identity in identities:
+            if (type(identity) is not ProcessIdentity or type(identity.pid) is not int or
+                    identity.pid <= 0 or type(identity.start_time) is not int or identity.start_time <= 0):
+                raise RuntimeError("Ollama ownership identity is invalid")
+        if (value.supervisor != expected_supervisor or value.daemon.pid in
+                {value.supervisor.pid} or (value.broker is not None and
+                value.broker.pid in {value.supervisor.pid, value.daemon.pid})):
+            raise RuntimeError("Ollama ownership supervisor or daemon mismatch")
+        if (type(value.descendants) is not tuple or not value.descendants or
+                len(set(value.descendants)) != len(value.descendants) or
+                len({item.pid for item in value.descendants}) != len(value.descendants) or
+                any(item.pid in {value.daemon.pid, value.supervisor.pid} for item in value.descendants) or
+                tuple(sorted(value.descendants, key=lambda item: (item.pid, item.start_time))) != value.descendants):
+            raise RuntimeError("Ollama ownership descendants are invalid")
+        return value
+
+    async def _fallback_residency(self) -> None:
+        proof = self.config.gpu_proof
+        if proof is None or proof.memory is None or proof.ollama_ownership is None:
+            raise RuntimeError("SmolLM model-specific residency proof is unavailable")
+        expected = proof.expected_supervisor
+        if expected is None:
+            raise RuntimeError("GPU supervisor identity proof is unavailable")
+        snapshot_a = self._validate_owned_snapshot(
+            await self._resolve(proof.ollama_ownership()), expected)
+        endpoint_a = await self._resident_model()
+        post = await self._memory()
+        endpoint_b = await self._resident_model()
+        snapshot_b = self._validate_owned_snapshot(
+            await self._resolve(proof.ollama_ownership()), expected)
+        if snapshot_a != snapshot_b or endpoint_a != endpoint_b:
+            raise RuntimeError("SmolLM ownership or endpoint changed during readiness fence")
+        pre = self._preload_memory
+        if (pre is None or post.gpu_uuid != pre.gpu_uuid or post.supervisor != pre.supervisor or
+                post.total_bytes != pre.total_bytes or post.supervisor != expected):
+            raise RuntimeError("SmolLM memory identity or capacity changed")
+        if type(pre.used_bytes) is not int or type(post.used_bytes) is not int or post.used_bytes <= pre.used_bytes:
+            raise RuntimeError("SmolLM GPU memory increase is not positive")
+        self._model_specific_ready = True
+
+    def accepted_model_specific_residency(self) -> bool:
+        return self._model_specific_ready
 
     async def validate(self, profile: CapacityProfile) -> None:
         if (profile.model_id.value != "SmolLM" or
@@ -222,6 +312,7 @@ class SmolLMProvider:
 
     async def load(self, profile: CapacityProfile) -> None:
         async with self._lock:
+            self._model_specific_ready = False
             if self._cleanup_verified is False and self._session is None and self._model is None and getattr(self, "_ownership_started", False):
                 raise RuntimeError("previous Ollama ownership has not been cleaned up")
             self._ownership_started = True
@@ -238,6 +329,7 @@ class SmolLMProvider:
                 timeout=aiohttp.ClientTimeout(total=self.config.request_timeout_seconds))
             self._model, self._root, self._evidence = name, root, input_evidence
             try:
+                self._preload_memory = await self._memory()
                 await self._run_create(name, root / _GGUF)
             except BaseException:
                 # Import may have reached the daemon; retain ownership for RM cleanup.
@@ -281,31 +373,21 @@ class SmolLMProvider:
         return value
 
     async def _check_residency(self) -> None:
-        assert self._session is not None and self._model is not None
-        async with self._session.get("/api/ps", allow_redirects=False) as response:
-            if response.status != 200:
-                raise RuntimeError("Ollama residency check failed")
-            data = await self._json(response)
-        models = data.get("models") if isinstance(data, dict) else None
-        if not isinstance(models, list) or len(models) != 1 or not isinstance(models[0], dict):
-            raise RuntimeError("Ollama residency is not exclusively owned")
-        item = models[0]
-        # Ollama canonicalizes an untagged local name to ``:latest``.
-        if item.get("name") != self._model + ":latest":
-            raise RuntimeError("Ollama resident model identity mismatch")
-        if (type(item.get("size")) is not int or type(item.get("size_vram")) is not int
-                or item["size"] <= 0 or item["size_vram"] != item["size"]):
-            raise RuntimeError("intended model is not fully resident on GPU")
+        await self._resident_model()
 
     async def ready(self) -> None:
         self._ready = False
+        self._model_specific_ready = False
         if self._session is None or self._model is None:
             raise RuntimeError("provider is not loaded")
         if await self._gpu() != self.config.gpu_uuid:
             raise RuntimeError("GPU identity proof mismatch")
         await self._request(self._body(""), preload=True)
         await self._check_residency()
-        await self._residency_proof()
+        try:
+            await self._residency_proof()
+        except _ResidencyPending:
+            await self._fallback_residency()
         self._ready = True
 
     def _body(self, text: str) -> dict:
@@ -376,6 +458,7 @@ class SmolLMProvider:
 
     async def unload(self) -> None:
         async with self._lock:
+            self._model_specific_ready = False
             self._ready = False
             if self._tasks:
                 _, pending = await asyncio.wait(tuple(self._tasks.values()), timeout=self.config.request_timeout_seconds)
@@ -406,6 +489,8 @@ class SmolLMProvider:
                 self._cleanup_verified = True
             self._session = self._model = self._root = None
             self._evidence = self._profile = None
+            self._preload_memory = None
+            self._model_specific_ready = False
             self._ready = False
 
     async def verify_cleanup(self) -> bool:

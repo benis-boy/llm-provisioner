@@ -5,6 +5,7 @@ import time
 import unittest
 import warnings
 from pathlib import Path
+from unittest.mock import patch
 
 from services.llm.queue.contracts import FunctionDescriptor, FunctionRegistry, ModelId
 from services.llm.queue.eligibility import EligibilityEvaluator
@@ -13,7 +14,7 @@ from services.llm.queue.scheduler import DecodedPayload, DispatchContext, QueueS
 from services.llm.queue.store import QueueStore
 from services.llm.resource_manager.contracts import CapacityProfile, SampleMetadata
 from services.llm.resource_manager.core import ResourceManager
-from services.llm.resource_manager.protocol import ProviderResponse
+from services.llm.resource_manager.protocol import EventKind, ProgressEvent, ProviderResponse
 
 
 def profile(p=1):
@@ -332,6 +333,159 @@ class SchedulerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.scheduler.enqueue("r", "p", idempotency_key="r", ready=FunctionDescriptor("never"))
         await asyncio.sleep(.03)
         self.assertIsNone(self.scheduler._watchdog_deadline)
+
+    async def test_retry_uses_store_wall_clock_while_watchdog_keeps_monotonic_clock(self):
+        await self.scheduler.stop("replace_clocks")
+        self.scheduler = QueueScheduler(self.store, self.rm, profile(), self.provider,
+            decoder=lambda ref: DecodedPayload(ref.encode(), DispatchContext(128)), result_store=self.results, publisher=self.publisher,
+            clock=lambda: 10.0, loop_interval=.01, stop_timeout=.05)
+        await self.scheduler.start()
+        await self.enqueue()
+        await self.wait_for(lambda: any(call[:2] == ("execute", "r") for call in self.provider.calls))
+        token = self.store.db.execute("SELECT token FROM attempts WHERE request_id='r'").fetchone()[0]
+        with patch("services.llm.queue.store.time.time", return_value=1000.0):
+            self.scheduler._retry_one("r", token, True)
+        self.assertEqual(self.store.get("r")["next_attempt_at"], 1005.0)
+
+    async def test_optional_function_poll_cadence_and_local_enqueue_wake(self):
+        await self.scheduler.stop("replace_evaluator")
+        calls = []
+        registry = FunctionRegistry()
+        registry.register("blocked", lambda **_: calls.append("blocked") or False)
+        evaluator = EligibilityEvaluator(self.store, registry, poll_interval=.2)
+        self.scheduler = QueueScheduler(self.store, self.rm, profile(), self.provider,
+            decoder=lambda ref: DecodedPayload(ref.encode(), DispatchContext(128)),
+            result_store=self.results, publisher=self.publisher, evaluator=evaluator,
+            loop_interval=.005, stop_timeout=.05)
+        await self.scheduler.start()
+        await self.enqueue("blocked", ready=FunctionDescriptor("blocked"))
+        await self.wait_for(lambda: calls == ["blocked"])
+        await asyncio.sleep(.04)
+        self.assertEqual(calls, ["blocked"])
+        # A local enqueue invalidates the cached poll result and is dispatched
+        # immediately; it does not wait for the 200 ms function poll period.
+        await self.enqueue("ready")
+        await self.wait_for(lambda: any(call[:2] == ("execute", "ready") for call in self.provider.calls))
+
+    async def test_large_function_poll_interval_does_not_delay_armed_watchdog(self):
+        await self.scheduler.stop("replace_evaluator")
+        evaluator = EligibilityEvaluator(self.store, FunctionRegistry(), poll_interval=1.0)
+        self.scheduler = QueueScheduler(self.store, self.rm, profile(), self.provider,
+            decoder=lambda ref: DecodedPayload(ref.encode(), DispatchContext(128)),
+            result_store=self.results, publisher=self.publisher, evaluator=evaluator,
+            watchdog_seconds=.03, loop_interval=.005, stop_timeout=.05)
+        await self.scheduler.start()
+        await self.enqueue()
+        await self.wait_for(lambda: any(call[:2] == ("execute", "r") for call in self.provider.calls))
+        # The watchdog has its own monotonic loop; the one-second optional
+        # function cadence cannot postpone a deadline already armed by work.
+        await self.wait_for(lambda: not self.scheduler._started, timeout=.2)
+
+    async def test_large_poll_dispatches_two_ready_requests_without_per_request_delay(self):
+        await self.scheduler.stop("replace_evaluator")
+        evaluator = EligibilityEvaluator(self.store, FunctionRegistry(), poll_interval=1.0)
+        self.scheduler = QueueScheduler(self.store, self.rm, profile(2), self.provider,
+            decoder=lambda ref: DecodedPayload(ref.encode(), DispatchContext(128)),
+            result_store=self.results, publisher=self.publisher, evaluator=evaluator,
+            loop_interval=.005, stop_timeout=.05)
+        await self.scheduler.start()
+        await self.enqueue("a"); await self.enqueue("b")
+        await self.wait_for(lambda: {call[1] for call in self.provider.calls if call[0] == "execute"} == {"a", "b"}, .2)
+
+    async def test_independent_mutation_discards_cached_capability_for_new_head(self):
+        evaluator = EligibilityEvaluator(self.store, FunctionRegistry(), poll_interval=1.0)
+        # Stop only coordinator loops, not the durable session: direct polling
+        # below isolates cache fencing from a racing dispatch claim.
+        old = self.scheduler
+        old._stopping = True
+        tasks = tuple(old._tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), .5)
+        old._tasks.clear()
+        self.scheduler = QueueScheduler(self.store, self.rm, profile(), self.provider,
+            decoder=lambda ref: DecodedPayload(ref.encode(), DispatchContext(128)),
+            result_store=self.results, publisher=self.publisher, evaluator=evaluator,
+            loop_interval=.005, stop_timeout=.05)
+        self.scheduler.local_session = self.store.session
+        self.scheduler.rm_session = old.rm_session
+        self.scheduler._started, self.scheduler._stopping = True, False
+        # Hold dispatch after caching the old eligible capability.
+        self.store.enqueue("old", "old", idempotency_key="old")
+        cached = await self.scheduler._poll_eligibility()
+        self.assertEqual(cached.request_id, "old")
+        writer = QueueStore(self.store.path, "scheduler", ModelId.SMOLLM)
+        writer.session = self.store.session
+        try:
+            writer.enqueue("new", "new", insertion_mode="skip-line", idempotency_key="new")
+        finally:
+            writer.close()
+        self.assertEqual((await self.scheduler._poll_eligibility()).request_id, "new")
+
+    async def test_positive_cache_expires_and_rescans_external_readiness(self):
+        old = self.scheduler
+        rm_session = old.rm_session
+        # Stop only coordinator loops so the durable session remains accepting
+        # while this test drives the evaluator directly.
+        old._stopping = True
+        tasks = tuple(old._tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), .5)
+        old._tasks.clear()
+        readiness = {"earlier": False, "later": True}
+        registry = FunctionRegistry()
+        registry.register("external", lambda args, dependency_results: readiness[args["request"]])
+        evaluator = EligibilityEvaluator(self.store, registry, poll_interval=1.0)
+        now = [10.0]
+        self.scheduler = QueueScheduler(self.store, self.rm, profile(), self.provider,
+            decoder=lambda ref: ref.encode(), result_store=self.results, publisher=self.publisher,
+            evaluator=evaluator, clock=lambda: now[0], loop_interval=.005, stop_timeout=.05)
+        self.scheduler.local_session = self.store.session
+        self.scheduler.rm_session = rm_session
+        self.scheduler._started, self.scheduler._stopping = True, False
+        self.store.enqueue("earlier", "earlier", idempotency_key="earlier",
+                           ready=FunctionDescriptor("external", {"request": "earlier"}))
+        self.store.enqueue("later", "later", idempotency_key="later",
+                           ready=FunctionDescriptor("external", {"request": "later"}))
+
+        cached = await self.scheduler._poll_eligibility()
+        self.assertEqual(cached.request_id, "later")
+        self.assertIs((await self.scheduler._poll_eligibility()), cached)
+
+        readiness["earlier"] = True
+        readiness["later"] = False
+        now[0] = self.scheduler._next_evaluation_at
+        refreshed = await self.scheduler._poll_eligibility()
+        self.assertEqual(refreshed.request_id, "earlier")
+
+        readiness["earlier"] = False
+        now[0] = self.scheduler._next_evaluation_at
+        self.assertIsNone(await self.scheduler._poll_eligibility())
+
+    async def test_late_finished_result_without_cancel_event_cleans_watchdog_ownership(self):
+        await self.scheduler.stop("replace_profile")
+        self.scheduler = QueueScheduler(self.store, self.rm, profile(2), self.provider,
+            decoder=lambda ref: DecodedPayload(ref.encode(), DispatchContext(128)),
+            result_store=self.results, publisher=self.publisher, loop_interval=.005, stop_timeout=.05)
+        await self.scheduler.start()
+        await self.enqueue("late"); await self.enqueue("other")
+        await self.wait_for(lambda: {call[1] for call in self.provider.calls if call[0] == "execute"} == {"late", "other"})
+        token = self.store.db.execute("SELECT token FROM attempts WHERE request_id='late'").fetchone()[0]
+        session = self.scheduler.rm_session
+        await self.scheduler.cancel("late", idempotency_key="cancel-late")
+        deadline = self.scheduler._watchdog_deadline
+        event = ProgressEvent(999, 1, EventKind.RESPONSE_FINISHED, "late", token,
+                              session.session_token, session.generation, b"late")
+        await self.scheduler._handle_event(event)
+        self.assertEqual(self.scheduler._completion_sequence, 1)
+        self.assertNotEqual(self.scheduler._watchdog_deadline, deadline)
+        await self.wait_for(lambda: ("late", token) not in self.scheduler._active)
+        self.assertNotIn(("late", token), self.scheduler._active)
+        self.assertNotIn(("late", token), self.scheduler._pending)
+        self.assertIsNone(self.store.db.execute("SELECT 1 FROM handoffs WHERE request_id='late'").fetchone())
+        self.provider.release.set()
+        await self.wait_for(lambda: self.scheduler._watchdog_deadline is None)
 
 
 if __name__ == "__main__":
