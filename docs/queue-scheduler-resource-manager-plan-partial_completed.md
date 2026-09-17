@@ -11,7 +11,7 @@ ownership.
 G0 (durable, truthful, capacity-aware asynchronous LLM work) and G1–G4 remain
 `partial`. **No leaf goal is done.** The evidence below is unit, local
 integration, synthetic, candidate-image, or locally run installed-adapter
-evidence. It is not a production deployment, measured capacity profile,
+evidence. It is not a production deployment, measured capacity profile, or
 qualifying production-boundary E2E. Phases 0, 2, 3 and 4 have met their respective
 contract, local acceptance and candidate exits.
 The evidence does not replace the compatibility procedure, real concurrent
