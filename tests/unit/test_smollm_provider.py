@@ -20,10 +20,11 @@ from services.llm.providers.config import GPUProof, SmolLMProviderConfig
 from services.llm.providers.gpu import (GPUMemoryObservation, _ResidencyPending,
                                         GPUProofError, OwnedOllamaSnapshot,
                                         ProcessIdentity, ResidencyEvidence)
-from services.llm.providers.smollm import SmolLMProvider
+from services.llm.providers.smollm import LifecycleFailure, SmolLMProvider, _RequestFailure
 from services.llm.queue.contracts import ModelId
 from services.llm.resource_manager.contracts import CapacityProfile, SampleMetadata
 from services.llm.resource_manager.core import ResourceManager, ResourceManagerError
+from services.llm.resource_manager.protocol import EventKind
 
 
 def _profile(manifest: str, model: str) -> CapacityProfile:
@@ -75,13 +76,14 @@ class SmolLMProviderTests(unittest.IsolatedAsyncioTestCase):
                 response = web.StreamResponse(status=200, headers={"Content-Type": "application/json"})
                 await response.prepare(request)
                 await response.write(b'{"response":"o')
-                await response.write(b'k","done":true,"prompt_eval_count":4}')
+                await response.write(b'k","done":true,"prompt_eval_count":4,"eval_count":1}')
                 await response.write_eof()
                 return response
             if self.mode == "done-false":
                 return web.json_response({"response": "", "done": False})
             count = 0 if self.mode == "bad-p-count" else 4
-            return web.json_response({"response": "ok", "done": True, "prompt_eval_count": count})
+            return web.json_response({"response": "ok", "done": True, "prompt_eval_count": count,
+                                      "eval_count": 64, "done_reason": "stop"})
         async def ps(request):
             self.ps_calls += 1
             if self.ps_models is not None:
@@ -126,8 +128,13 @@ class SmolLMProviderTests(unittest.IsolatedAsyncioTestCase):
                 await provider.ready()
                 response = await provider.execute("request", b"hello")
             self.assertEqual(response.result, b"ok")
+            self.assertFalse(hasattr(provider, "_request_intervals"))
             self.assertEqual(self.requests[-1]["prompt"], "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n")
             self.assertEqual(self.requests[-1]["options"], {"num_ctx": 512, "num_predict": 64, "temperature": 0})
+            self.assertEqual(response.observation["configured_num_predict"], self.requests[-1]["options"]["num_predict"])
+            self.assertEqual(response.observation["configured_num_ctx"], self.requests[-1]["options"]["num_ctx"])
+            self.assertNotIn("prompt", response.observation)
+            self.assertNotIn("response", response.observation)
             await provider.unload()
             self.assertTrue(await provider.verify_cleanup())
 
@@ -139,9 +146,50 @@ class SmolLMProviderTests(unittest.IsolatedAsyncioTestCase):
             provider = SmolLMProvider(config)
             with mock.patch("services.llm.providers.smollm.verify_current", return_value={"manifestSha256": "1" * 64}), \
                  mock.patch.object(provider, "_run_create") as create:
-                with self.assertRaises(ValueError):
+                with self.assertRaises(LifecycleFailure) as raised:
                     await provider.load(_profile("0" * 64, "1" * 64))
+                self.assertEqual("artifact_verification", raised.exception.lifecycle_subreason)
             create.assert_not_awaited()
+
+    async def test_pre_listener_refusal_proves_absence_closes_session_and_clears_state(self):
+        config = SmolLMProviderConfig(Path("/tmp"), "0" * 64, "1" * 64, "GPU-1", "runtime", "adapter",
+            gpu_proof=_gpu_proof(), ollama_port=self.port)
+        provider = SmolLMProvider(config)
+        with mock.patch.object(provider, "_prove_artifact", return_value=({}, Path("/tmp"), {})), \
+             mock.patch.object(provider, "_memory", side_effect=ConnectionRefusedError("hostile refusal text")):
+            with self.assertRaises(LifecycleFailure) as raised:
+                await provider.load(_profile("0" * 64, "1" * 64))
+            self.assertEqual("gpu_memory_proof", raised.exception.lifecycle_subreason)
+        session = provider._session
+        self.assertIsNotNone(session)
+        await provider.unload()
+        self.assertTrue(session.closed)
+        self.assertIsNone(provider._session)
+        self.assertIsNone(provider._model)
+        self.assertTrue(await provider.verify_cleanup())
+
+    async def test_pre_listener_refusal_with_owned_daemon_keeps_cleanup_failed(self):
+        supervisor = ProcessIdentity(10, 42)
+        owned = OwnedOllamaSnapshot(supervisor, ProcessIdentity(20, 52),
+                                    (ProcessIdentity(21, 53),))
+        config = SmolLMProviderConfig(Path("/tmp"), "0" * 64, "1" * 64, "GPU-1", "runtime", "adapter",
+            gpu_proof=GPUProof(lambda: "GPU-1", lambda: True,
+                expected_supervisor=supervisor, ollama_ownership=lambda: owned), ollama_port=self.port)
+        provider = SmolLMProvider(config)
+        with mock.patch.object(provider, "_prove_artifact", return_value=({}, Path("/tmp"), {})), \
+             mock.patch.object(provider, "_memory", side_effect=ConnectionRefusedError("hostile refusal text")):
+            with self.assertRaises(LifecycleFailure) as raised:
+                await provider.load(_profile("0" * 64, "1" * 64))
+            self.assertEqual("gpu_memory_proof", raised.exception.lifecycle_subreason)
+        session = provider._session
+        await self.assertRaisesAsync(RuntimeError, provider.unload())
+        self.assertTrue(session.closed)
+        self.assertIsNone(provider._session)
+        self.assertFalse(await provider.verify_cleanup())
+
+    async def assertRaisesAsync(self, expected, awaitable):
+        with self.assertRaises(expected):
+            await awaitable
 
     async def test_cleanup_verification_is_model_state_only_and_does_not_probe_gpu(self):
         cleanup = mock.Mock(return_value=False)
@@ -355,6 +403,21 @@ class SmolLMProviderTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(provider, "_prove_artifact", return_value=({}, Path("/tmp"), {})):
             await provider.load(profile)
         self.assertEqual(["memory", "create"], order)
+        await provider.unload()
+
+    async def test_load_failure_closes_partially_created_session(self):
+        provider, tmp = await self._loaded_provider()
+        await provider.unload()
+        provider = SmolLMProvider(provider.config)
+        session = None
+        with mock.patch.object(provider, "_prove_artifact", return_value=({}, Path("/tmp"), {})), \
+             mock.patch.object(provider, "_memory", side_effect=RuntimeError("memory proof failed")):
+            with self.assertRaises(LifecycleFailure) as raised:
+                await provider.load(_profile(provider.config.manifest_sha256, provider.config.model_sha256))
+            self.assertEqual("gpu_memory_proof", raised.exception.lifecycle_subreason)
+            session = provider._session
+        self.assertIsNotNone(session)
+        self.assertTrue(session.closed)
 
     async def test_nonpending_gpu_failure_never_uses_fallback_and_failed_ready_clears_bit(self):
         provider, tmp = await self._loaded_provider()
@@ -368,8 +431,9 @@ class SmolLMProviderTests(unittest.IsolatedAsyncioTestCase):
                 proof.identity, proof.cleanup,
                 lambda: (_ for _ in ()).throw(RuntimeError("immediate failure")),
                 expected_supervisor=proof.expected_supervisor, memory=proof.memory))
-            with self.assertRaisesRegex(RuntimeError, "immediate failure"):
+            with self.assertRaises(LifecycleFailure) as raised:
                 await provider.ready()
+            self.assertEqual("gpu_residency", raised.exception.lifecycle_subreason)
             self.assertFalse(provider._ready)
             self.assertFalse(provider.accepted_model_specific_residency())
         finally:
@@ -455,6 +519,53 @@ class SmolLMProviderTests(unittest.IsolatedAsyncioTestCase):
             self.mode = None
             await provider.unload()
 
+    async def test_execute_closes_input_and_observation_faults_with_stage_categories(self):
+        provider, tmp = await self._loaded_provider()
+        try:
+            await provider.ready()
+            with self.assertRaises(_RequestFailure) as decode:
+                await provider.execute("decode", b"\xff")
+            self.assertEqual(decode.exception.failure.code, "smollm_input_decode")
+
+            with mock.patch.object(provider, "_request", return_value={"response": "ok"}):
+                with self.assertRaises(_RequestFailure) as observation:
+                    await provider.execute("observation", b"hello")
+            self.assertEqual(observation.exception.failure.code,
+                             "smollm_observation_contract")
+        finally:
+            await provider.unload()
+
+    async def test_actual_request_failure_reaches_resource_manager_event_with_closed_code(self):
+        provider, tmp = await self._loaded_provider()
+        rm = ResourceManager(cleanup_timeout=.2, stop_timeout=.2)
+        try:
+            await provider.unload()
+            with mock.patch.object(provider, "_prove_artifact", return_value=({}, Path("/tmp"), {})), \
+                 mock.patch.object(provider, "_run_create"):
+                session = await rm.start_session("diagnostic", ModelId.SMOLLM,
+                                                 _profile(provider.config.manifest_sha256,
+                                                          provider.config.model_sha256), provider,
+                                                 idempotency_key="start")
+            self.mode = "malformed"
+            await rm.submit(session.session_token, "p2-request", "attempt", b"hello",
+                            idempotency_key="submit", context_size=512)
+            for _ in range(20):
+                failures = [event.failure for event in rm._events[session.session_token]
+                            if event.kind is EventKind.FAILURE]
+                if failures:
+                    break
+                await asyncio.sleep(0)
+            self.assertEqual(len(failures), 1)
+            self.assertEqual(failures[0].code, "ollama_json_response")
+            self.assertTrue(failures[0].retryable)
+            self.mode = None
+            await rm.stop_session(session.session_token, idempotency_key="stop")
+            self.assertEqual(rm.snapshot().phase, "startup")
+        finally:
+            self.mode = None
+            if rm._session is not None:
+                await rm.stop_session(rm._session.session_token, idempotency_key="teardown")
+
     async def test_redirect_foreign_residency_and_gpu_identity_fail_closed(self):
         provider, tmp = await self._loaded_provider()
         try:
@@ -491,6 +602,23 @@ class SmolLMProviderTests(unittest.IsolatedAsyncioTestCase):
             await provider.unload()
             self.assertTrue(await provider.verify_cleanup())
         finally:
+            if provider._session is not None:
+                await provider.unload()
+
+    async def test_replacement_session_closes_and_state_is_retained_on_unload_failure(self):
+        provider, tmp = await self._loaded_provider()
+        try:
+            session = provider._session
+            await session.close()
+            self.mode = "failed-unload"
+            with self.assertRaises(RuntimeError):
+                await provider.unload()
+            self.assertIsNotNone(provider._session)
+            self.assertTrue(provider._session.closed)
+            self.assertIsNotNone(provider._model)
+            self.assertFalse(await provider.verify_cleanup())
+        finally:
+            self.mode = None
             if provider._session is not None:
                 await provider.unload()
 

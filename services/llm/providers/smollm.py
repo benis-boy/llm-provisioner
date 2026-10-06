@@ -15,18 +15,69 @@ import aiohttp
 
 from services.llm.provisioning.volume import verify_current
 from services.llm.resource_manager.contracts import CapacityProfile
-from services.llm.resource_manager.protocol import ProviderResponse
+from services.llm.resource_manager.protocol import Failure, ProviderResponse
 from .config import SmolLMProviderConfig
 from .gpu import (GPUMemoryObservation, OwnedOllamaSnapshot, ProcessIdentity,
                   ResidencyEvidence, _ResidencyPending, settle_residency)
 from .input_bounds import (SMOLLM_MAX_RAW_BYTES, frame_smollm_prompt,
-                           validate_smollm_input)
+                            validate_smollm_input)
+try:
+    from tools.compatibility.debug_trace import lifecycle
+except ImportError:
+    def lifecycle(*args, **kwargs): return lambda function: function
 
 _GGUF = "SmolLM2-1.7B-Instruct-Q8_0.gguf"
 _JSON_LIMIT = 128 * 1024
 _CLI_LIMIT = 128 * 1024
 _ABSENCE_TIMEOUT_SECONDS = 5.0
 _ABSENCE_POLL_INTERVAL_SECONDS = 0.2
+_DONE_REASONS = frozenset(("stop", "length", "load", "unload"))
+
+LIFECYCLE_PHASES = frozenset(("validate", "load", "ready", "cleanup"))
+LIFECYCLE_SUBREASONS = frozenset((
+    "profile_shape_identity", "gpu_identity_proof", "artifact_verification",
+    "gpu_memory_proof", "ollama_create", "readiness_request",
+    "endpoint_residency", "gpu_residency", "fallback_ownership_memory",
+    "timeout", "cleanup_verification",
+))
+
+
+class LifecycleFailure(RuntimeError):
+    """A closed, non-text lifecycle classification for startup and cleanup."""
+
+    def __init__(self, phase: str, subreason: str, cause: BaseException | None = None):
+        if phase not in LIFECYCLE_PHASES or subreason not in LIFECYCLE_SUBREASONS:
+            raise ValueError("invalid lifecycle classification")
+        super().__init__("provider lifecycle operation failed")
+        self.lifecycle_phase = phase
+        self.lifecycle_subreason = subreason
+        if cause is not None:
+            self.__cause__ = cause
+
+
+def _lifecycle(phase: str, subreason: str, exc: BaseException) -> LifecycleFailure:
+    if isinstance(exc, LifecycleFailure):
+        return exc
+    if isinstance(exc, asyncio.CancelledError):
+        raise exc
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        subreason = "timeout"
+    return LifecycleFailure(phase, subreason, exc)
+
+
+class _RequestFailure(RuntimeError):
+    """A bounded provider failure suitable for ResourceManager classification."""
+
+    def __init__(self, failure: Failure) -> None:
+        super().__init__(failure.message)
+        self.failure = failure
+        self.failure_kind = "provider_execution_failed"
+        self.failure_code = failure.code
+        self.failure_message = failure.message
+
+
+def _request_failure(code: str, message: str, *, retryable: bool = True) -> _RequestFailure:
+    return _RequestFailure(Failure(code, message, retryable))
 
 
 class SmolLMProvider:
@@ -43,6 +94,11 @@ class SmolLMProvider:
         self._ready = False
         self._preload_memory: GPUMemoryObservation | None = None
         self._model_specific_ready = False
+        # A failed pre-listener load is different from a failed unload: no
+        # request can have reached the private daemon, so it may be safe to
+        # discard the client once the independent ownership fence is clean.
+        self._listener_reached = False
+        self._pre_listener_failure = False
         # Keep the clock and wait operation injectable so cleanup polling can
         # be tested without making the bounded wait real-time.
         self._absence_clock = time.monotonic
@@ -109,6 +165,101 @@ class SmolLMProvider:
         if value.gpu_uuid != self.config.gpu_uuid or value.supervisor != expected:
             raise RuntimeError("GPU memory identity mismatch")
         return value
+
+    @staticmethod
+    def _connection_refused(exc: BaseException) -> bool:
+        """Recognise refusal without treating exception text as a protocol."""
+        pending = [exc]
+        seen: set[int] = set()
+        while pending and len(seen) < 16:
+            current = pending.pop(0)
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            if isinstance(current, (aiohttp.ClientConnectorError,
+                                    ConnectionRefusedError)):
+                return True
+            if isinstance(current, OSError) and getattr(current, "errno", None) == 111:
+                return True
+            if isinstance(current, BaseExceptionGroup):
+                pending.extend(item for item in current.exceptions
+                               if isinstance(item, BaseException))
+            for related in (current.__cause__, current.__context__):
+                if isinstance(related, BaseException):
+                    pending.append(related)
+        return False
+
+    async def _pre_listener_absent(self) -> bool:
+        """Require an ownership fence before accepting a refused first probe.
+
+        A refused socket is only an observation.  The GPU cleanup probe (and,
+        when supplied, the daemon's process-group probe) must also say that no
+        owned work remains.  Unknown ownership errors stay fail-closed.
+        """
+        proof = self.config.gpu_proof
+        if proof is None:
+            return False
+        try:
+            clean = await self._resolve(proof.cleanup())
+        except BaseException:
+            return False
+        if clean is not True:
+            return False
+        ownership = proof.ollama_ownership
+        if ownership is None:
+            # The GPU proof is the existing process absence fence for legacy
+            # bindings.  It is combined with the refused private endpoint and
+            # the fact that this provider never reached its listener.
+            return True
+        try:
+            await self._resolve(ownership())
+        except (ProcessLookupError, FileNotFoundError):
+            return True
+        except BaseException as exc:
+            message = str(exc).lower()
+            if any(word in message for word in ("not available", "not started", "disappeared", "group gone")):
+                return True
+            return False
+        # A positive snapshot means an owned daemon may exist.
+        return False
+
+    async def _clear_local_state(self) -> None:
+        session = self._session
+        self._session = None
+        self._model = self._root = self._evidence = None
+        self._profile = None
+        self._preload_memory = None
+        self._model_specific_ready = False
+        self._ready = False
+        self._listener_reached = False
+        self._pre_listener_failure = False
+        if session is not None and not session.closed:
+            await session.close()
+
+    async def _close_session(self, session: aiohttp.ClientSession) -> None:
+        """Close a client even when load is cancelled, with an owned deadline."""
+        if session.closed:
+            return
+        close_task = asyncio.create_task(session.close())
+        deadline = time.monotonic() + self.config.request_timeout_seconds
+        cancelled = False
+        while not close_task.done() and time.monotonic() < deadline:
+            try:
+                await asyncio.shield(close_task)
+            except asyncio.CancelledError:
+                cancelled = True
+                continue
+        if not close_task.done():
+            # Do not detach a live owned close.  Cancellation is the only
+            # bounded escape hatch for a connector whose transport is stuck.
+            close_task.cancel()
+            await asyncio.gather(close_task, return_exceptions=True)
+            if cancelled:
+                raise asyncio.CancelledError
+            raise RuntimeError("provider client close timed out")
+        close_task.result()
+        if cancelled:
+            raise asyncio.CancelledError
 
     async def _resident_model(self) -> tuple[str, int, int]:
         """Read and validate the exact private endpoint model state."""
@@ -177,17 +328,24 @@ class SmolLMProvider:
     def accepted_model_specific_residency(self) -> bool:
         return self._model_specific_ready
 
+    @lifecycle("provider.smollm")
     async def validate(self, profile: CapacityProfile) -> None:
-        if (profile.model_id.value != "SmolLM" or
-                profile.optimal_parallelism != self.config.parallelism or
-                profile.context_size != 512 or profile.bucket_identity is not None):
-            raise ValueError("profile is not the configured SmolLM capacity")
-        if not profile.matches(profile.model_id, self.config.gpu_uuid,
-                               self.config.manifest_sha256, self.config.model_sha256,
-                               self.config.runtime_identity, self.config.adapter_identity):
-            raise ValueError("capacity profile identities do not match server configuration")
-        if await self._gpu() != self.config.gpu_uuid:
-            raise ValueError("GPU identity proof mismatch")
+        try:
+            if (profile.model_id.value != "SmolLM" or
+                    profile.optimal_parallelism != self.config.parallelism or
+                    profile.context_size != 512 or profile.bucket_identity is not None):
+                raise ValueError("profile is not the configured SmolLM capacity")
+            if not profile.matches(profile.model_id, self.config.gpu_uuid,
+                                   self.config.manifest_sha256, self.config.model_sha256,
+                                   self.config.runtime_identity, self.config.adapter_identity):
+                raise ValueError("capacity profile identities do not match server configuration")
+        except BaseException as exc:
+            raise _lifecycle("validate", "profile_shape_identity", exc)
+        try:
+            if await self._gpu() != self.config.gpu_uuid:
+                raise ValueError("GPU identity proof mismatch")
+        except BaseException as exc:
+            raise _lifecycle("validate", "gpu_identity_proof", exc)
         self._profile = profile
 
     @staticmethod
@@ -310,6 +468,7 @@ class SmolLMProvider:
         finally:
             Path(modelfile).unlink(missing_ok=True)
 
+    @lifecycle("provider.smollm")
     async def load(self, profile: CapacityProfile) -> None:
         async with self._lock:
             self._model_specific_ready = False
@@ -321,7 +480,10 @@ class SmolLMProvider:
                 raise RuntimeError("provider is already loaded")
             # Resource Manager owns cleanup from the beginning of load, even
             # when artifact validation fails before a session is acquired.
-            evidence, root, input_evidence = await asyncio.to_thread(self._prove_artifact)
+            try:
+                evidence, root, input_evidence = await asyncio.to_thread(self._prove_artifact)
+            except BaseException as exc:
+                raise _lifecycle("load", "artifact_verification", exc)
             name = "smollm-" + self.config.model_sha256[:16]
             self._cleanup_verified = False
             self._ownership_started = True
@@ -329,10 +491,22 @@ class SmolLMProvider:
                 timeout=aiohttp.ClientTimeout(total=self.config.request_timeout_seconds))
             self._model, self._root, self._evidence = name, root, input_evidence
             try:
-                self._preload_memory = await self._memory()
-                await self._run_create(name, root / _GGUF)
-            except BaseException:
+                try:
+                    self._preload_memory = await self._memory()
+                except BaseException as exc:
+                    raise _lifecycle("load", "gpu_memory_proof", exc)
+                try:
+                    await self._run_create(name, root / _GGUF)
+                except BaseException as exc:
+                    raise _lifecycle("load", "ollama_create", exc)
+                self._listener_reached = True
+            except BaseException as exc:
                 # Import may have reached the daemon; retain ownership for RM cleanup.
+                self._pre_listener_failure = (not self._listener_reached and
+                                              self._connection_refused(exc))
+                session = self._session
+                if session is not None:
+                    await self._close_session(session)
                 raise
 
     @staticmethod
@@ -357,37 +531,80 @@ class SmolLMProvider:
 
     async def _request(self, body, *, preload=False):
         assert self._session is not None
-        async with self._session.post("/api/generate", json=body, allow_redirects=False) as response:
-            if response.status != 200:
-                raise RuntimeError("Ollama generation failed")
-            value = await self._json(response)
+        started = time.monotonic_ns()
+        try:
+            async with self._session.post("/api/generate", json=body, allow_redirects=False) as response:
+                if response.status != 200:
+                    raise _request_failure("ollama_http_status", "Ollama generation returned a non-success status",
+                                           retryable=response.status >= 500)
+                try:
+                    value = await self._json(response)
+                except _RequestFailure:
+                    raise
+                except Exception as exc:
+                    raise _request_failure("ollama_json_response", "Ollama returned invalid JSON") from exc
+        except _RequestFailure:
+            raise
+        except Exception as exc:
+            raise _request_failure("ollama_transport", "Ollama generation transport failed") from exc
         if not isinstance(value, dict) or value.get("done") is not True:
-            raise RuntimeError("invalid Ollama response")
+            raise _request_failure("ollama_response_contract", "Ollama generation response contract failed", retryable=False)
         if preload:
             return value
         if not isinstance(value.get("response"), str) or not value["response"]:
-            raise RuntimeError("invalid Ollama response")
+            raise _request_failure("ollama_response_contract", "Ollama generation response contract failed", retryable=False)
         count = value.get("prompt_eval_count")
         if type(count) is not int or not 1 <= count <= 448:
-            raise RuntimeError("invalid prompt evaluation count")
+            raise _request_failure("ollama_telemetry_contract", "Ollama generation telemetry contract failed", retryable=False)
+        options = body.get("options") if isinstance(body, dict) else None
+        configured = options.get("num_predict") if isinstance(options, dict) else None
+        context = options.get("num_ctx") if isinstance(options, dict) else None
+        if type(configured) is not int or configured < 1:
+            raise _request_failure("ollama_response_contract", "Ollama generation response contract failed", retryable=False)
+        if type(context) is not int or context < 1:
+            raise _request_failure("ollama_response_contract", "Ollama generation response contract failed", retryable=False)
+        eval_count = value.get("eval_count")
+        if type(eval_count) is not int or not 1 <= eval_count <= configured:
+            raise _request_failure("ollama_telemetry_contract", "Ollama generation telemetry contract failed", retryable=False)
+        done_reason = value.get("done_reason")
+        if done_reason is not None and (not isinstance(done_reason, str) or
+                                        done_reason not in _DONE_REASONS):
+            raise _request_failure("ollama_telemetry_contract", "Ollama generation telemetry contract failed", retryable=False)
+        value["_native_started_ns"] = started
+        value["_native_ended_ns"] = time.monotonic_ns()
         return value
 
     async def _check_residency(self) -> None:
         await self._resident_model()
 
+    @lifecycle("provider.smollm")
     async def ready(self) -> None:
         self._ready = False
         self._model_specific_ready = False
         if self._session is None or self._model is None:
             raise RuntimeError("provider is not loaded")
-        if await self._gpu() != self.config.gpu_uuid:
-            raise RuntimeError("GPU identity proof mismatch")
-        await self._request(self._body(""), preload=True)
-        await self._check_residency()
+        try:
+            if await self._gpu() != self.config.gpu_uuid:
+                raise RuntimeError("GPU identity proof mismatch")
+        except BaseException as exc:
+            raise _lifecycle("ready", "gpu_identity_proof", exc)
+        try:
+            await self._request(self._body(""), preload=True)
+        except BaseException as exc:
+            raise _lifecycle("ready", "readiness_request", exc)
+        try:
+            await self._check_residency()
+        except BaseException as exc:
+            raise _lifecycle("ready", "endpoint_residency", exc)
         try:
             await self._residency_proof()
         except _ResidencyPending:
-            await self._fallback_residency()
+            try:
+                await self._fallback_residency()
+            except BaseException as exc:
+                raise _lifecycle("ready", "fallback_ownership_memory", exc)
+        except BaseException as exc:
+            raise _lifecycle("ready", "gpu_residency", exc)
         self._ready = True
 
     def _body(self, text: str) -> dict:
@@ -402,20 +619,89 @@ class SmolLMProvider:
         if len(text.encode("ascii")) > SMOLLM_MAX_RAW_BYTES or len(frame_smollm_prompt(text).encode("ascii")) > 448:
             raise ValueError("SmolLM input exceeds proved no-truncation bound")
 
+    @staticmethod
+    def _execute_internal_failure() -> _RequestFailure:
+        """Close unexpected adapter faults at the provider execution boundary."""
+        return _request_failure("smollm_internal", "SmolLM execution failed")
+
+    @staticmethod
+    def _observation_contract_failure() -> _RequestFailure:
+        return _request_failure("smollm_observation_contract",
+                                "SmolLM execution observation contract failed",
+                                retryable=False)
+
+    @lifecycle("provider.smollm", failures_only=True)
     async def execute(self, request_id: str, payload: bytes) -> ProviderResponse:
-        if self._session is None or self._model is None or not self._ready:
-            raise RuntimeError("provider is not loaded")
-        if request_id in self._tasks:
-            raise RuntimeError("duplicate request id")
-        if len(self._tasks) >= self.config.parallelism:
-            raise RuntimeError("configured SmolLM parallelism is exhausted")
-        text = payload.decode("utf-8")
-        self._validate_text(text)
+        try:
+            if self._session is None or self._model is None or not self._ready:
+                raise self._execute_internal_failure()
+            if request_id in self._tasks:
+                raise self._execute_internal_failure()
+            if len(self._tasks) >= self.config.parallelism:
+                raise self._execute_internal_failure()
+            try:
+                text = payload.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise _request_failure("smollm_input_decode", "SmolLM input decoding failed",
+                                       retryable=False) from exc
+            try:
+                self._validate_text(text)
+            except (TypeError, ValueError, UnicodeError) as exc:
+                raise _request_failure("smollm_input_validation",
+                                       "SmolLM input validation failed", retryable=False) from exc
+        except asyncio.CancelledError:
+            raise
+        except _RequestFailure:
+            raise
+        except BaseException as exc:
+            raise self._execute_internal_failure() from exc
+
         async def run():
-            value = await self._request(self._body(text))
-            return ProviderResponse(value["response"].encode(), None, False)
-        task = asyncio.create_task(run())
-        self._tasks[request_id] = task
+            # Keep the witness coupled to the exact native request sent over
+            # the wire.  A second hard-coded extractor is not evidence of the
+            # request that Ollama actually received.
+            try:
+                body = self._body(text)
+                value = await self._request(body)
+                try:
+                    started = value.pop("_native_started_ns")
+                    ended = value.pop("_native_ended_ns")
+                    options = body["options"]
+                    response = value["response"]
+                    if (type(started) is not int or type(ended) is not int or started < 0
+                            or ended < started or not isinstance(options, dict)
+                            or not isinstance(response, str) or not response):
+                        raise ValueError("invalid native observation")
+                    observation = {"kind": "ollama_generate", "request_id": request_id,
+                                   "execution_started": started, "execution_ended": ended,
+                                   "configured_num_predict": options["num_predict"],
+                                   "configured_num_ctx": options["num_ctx"],
+                                   "configured_temperature": options["temperature"],
+                                   "prompt_eval_count": value.get("prompt_eval_count"),
+                                   "eval_count": value.get("eval_count"),
+                                   "done_reason": value.get("done_reason"),
+                                   "prompt_eval_duration": value.get("prompt_eval_duration"),
+                                   "eval_duration": value.get("eval_duration"),
+                                   "load_duration": value.get("load_duration"),
+                                   "total_duration": value.get("total_duration")}
+                except (KeyError, TypeError, ValueError, UnicodeError) as exc:
+                    raise self._observation_contract_failure() from exc
+                return ProviderResponse(response.encode(), None, False, observation)
+            except asyncio.CancelledError:
+                raise
+            except _RequestFailure:
+                raise
+            except BaseException as exc:
+                raise self._execute_internal_failure() from exc
+        try:
+            task = asyncio.create_task(run())
+            self._tasks[request_id] = task
+        except asyncio.CancelledError:
+            raise
+        except _RequestFailure:
+            raise
+        except BaseException as exc:
+            raise self._execute_internal_failure() from exc
         def finish(done):
             if self._tasks.get(request_id) is done:
                 self._tasks.pop(request_id, None)
@@ -456,7 +742,14 @@ class SmolLMProvider:
                 raise RuntimeError("Ollama still has resident models")
             await self._absence_sleep(min(_ABSENCE_POLL_INTERVAL_SECONDS, remaining))
 
+    @lifecycle("provider.smollm")
     async def unload(self) -> None:
+        try:
+            await self._unload()
+        except BaseException as exc:
+            raise _lifecycle("cleanup", "cleanup_verification", exc)
+
+    async def _unload(self) -> None:
         async with self._lock:
             self._model_specific_ready = False
             self._ready = False
@@ -464,14 +757,39 @@ class SmolLMProvider:
                 _, pending = await asyncio.wait(tuple(self._tasks.values()), timeout=self.config.request_timeout_seconds)
                 if pending:
                     raise RuntimeError("provider requests did not drain")
+            if self._pre_listener_failure:
+                if not await self._pre_listener_absent():
+                    # The endpoint refusal does not prove absence.  We can
+                    # still release our HTTP transport, but deliberately keep
+                    # cleanup unverified so Resource Manager remains fenced.
+                    await self._clear_local_state()
+                    raise RuntimeError("cannot prove pre-listener Ollama absence")
+                self._cleanup_verified = True
+                await self._clear_local_state()
+                return
+            replaced_session = False
+            if self._session is not None and self._session.closed:
+                self._session = aiohttp.ClientSession(base_url=self._url, trust_env=False,
+                    timeout=aiohttp.ClientTimeout(total=self.config.request_timeout_seconds))
+                replaced_session = True
             if self._session is not None and self._model is not None:
-                async with self._session.post("/api/generate", json={"model": self._model, "prompt": "", "keep_alive": 0, "stream": False}, allow_redirects=False) as response:
-                    if response.status != 200:
-                        raise RuntimeError("Ollama unload failed")
-                    terminal = await self._json(response)
-                    if not isinstance(terminal, dict) or terminal.get("done") is not True or terminal.get("error"):
-                        raise RuntimeError("Ollama unload was not terminal")
-                await self._check_absent()
+                try:
+                    async with self._session.post("/api/generate", json={"model": self._model, "prompt": "", "keep_alive": 0, "stream": False}, allow_redirects=False) as response:
+                        if response.status != 200:
+                            raise RuntimeError("Ollama unload failed")
+                        terminal = await self._json(response)
+                        if not isinstance(terminal, dict) or terminal.get("done") is not True or terminal.get("error"):
+                            raise RuntimeError("Ollama unload was not terminal")
+                    await self._check_absent()
+                except BaseException:
+                    # A replacement exists only to make a closed client usable
+                    # for verification.  It must never survive a failed probe;
+                    # retain the closed session and model as the fail-closed
+                    # witness rather than clearing state that proves cleanup is
+                    # still unverified.
+                    if replaced_session and self._session is not None:
+                        await self._close_session(self._session)
+                    raise
                 self._cleanup_verified = True
                 await self._session.close()
             elif self._session is None and self._model is None:
@@ -487,16 +805,14 @@ class SmolLMProvider:
                     if not isinstance(value, dict) or not isinstance(value.get("models"), list) or value["models"]:
                         raise RuntimeError("Ollama still has resident models")
                 self._cleanup_verified = True
-            self._session = self._model = self._root = None
-            self._evidence = self._profile = None
-            self._preload_memory = None
-            self._model_specific_ready = False
-            self._ready = False
+            await self._clear_local_state()
 
+    @lifecycle("provider.smollm")
     async def verify_cleanup(self) -> bool:
         return (self._session is None and self._model is None and
                 self._cleanup_verified)
 
+    @lifecycle("provider.smollm", failures_only=True)
     async def validate_input(self, payload: bytes, *, context_size: int | None, bucket_identity: str | None) -> None:
         if (not isinstance(payload, bytes) or self._profile is None or context_size != 512
                 or bucket_identity is not None or not self._profile.accepts_request(context_size, bucket_identity)):

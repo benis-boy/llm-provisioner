@@ -25,7 +25,10 @@ a 256-raw-byte fixture bucket. The exact raw request frame is
 prevents Ollama from applying another template. This establishes the conservative
 upper bound `framed ASCII bytes <= 448`, leaving a 64-token output reserve
 in `num_ctx=512`. Ollama uses fixed `num_predict=64` and `temperature=0`, and a
-response must be `done: true` with `prompt_eval_count <= 448`. This is neither an
+response must be `done: true` with `prompt_eval_count <= 448`; telemetry records
+configured `num_predict=64`/`num_ctx=512` alongside actual `eval_count`. Natural
+EOS may finish below 64, so this is execution under the configured maximum-output
+ceiling, not maximum-output execution. This is neither an
 exact token count nor a model maximum; non-ASCII input fails closed because its
 byte fallback coverage was not independently established.
 

@@ -361,6 +361,19 @@ not the remaining capacity-proof or production-readiness goals.
 
 ## Evidence summary and open follow-up map
 
+## Phase 5 first-checkbox bounded evidence — 2026-09-18
+
+The operator CLI boundary now has focused subprocess coverage for all three
+configured parent-folder roots. Test-owned tiny offline fixtures prove concise
+success output, content-addressed `current` selection, exact selected file sets,
+deterministic rerun, and nonzero failure for missing GECToR
+`verb-form-vocab.txt` while preserving the prior selection. This is unit/
+operator-boundary evidence only; it does not claim G4.3 completion, measured
+capacity, production image approval, semantic model validation, or production
+E2E. The focused artifact-volume suite passed **19 tests** with warnings treated
+as errors (acceptance run 0.324s; final confirmation 0.350s), and
+`git diff --check` passed.
+
 The consolidated local verification record includes: latest full discovery
 **427 tests in 50.677s** with compilation and whitespace checks; **141 focused
 runtime-composition tests in 32.034s**; **98 focused OwnedOllama/supervisor

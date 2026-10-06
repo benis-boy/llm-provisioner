@@ -16,6 +16,154 @@ candidate offline tooling exist. Real production provider/server boundaries,
 measured profiles and production packaging remain incomplete.
 No qualifying production-boundary E2E proof exists and no leaf is done.
 
+## Latest Phase 5 actual-GPU attempt (2026-09-18)
+
+**Failed/incomplete operator/GPU evidence, not qualifying E2E or capacity proof.**
+The exact target was `GPU-d15a7ff9-a19b-3ece-7510-759a0bca1963` (RTX 4070 Ti,
+12,282 MiB); bounded preflight found no compute applications and Docker was
+29.7.2. The offline current-source image used verified local base
+`sha256:ceb56141eb754ee162f6861cd13c70b574861cb2ba729ed122332c938e46b2b4`
+and manifest
+`sha256:8483f0c6db1c884005da1805b904409afa636d110166b968bbf5b267201352db`.
+
+A narrow CLI defect was corrected: global argparse `--provenance` had blocked
+non-persistent `--diagnostic-smollm-p2`; provenance is now required only outside
+diagnostic mode. `tests.unit.test_measure_profiles` passed 10 tests in 0.035s
+and `py_compile` passed, which is local regression evidence only. The first
+operator transfer omitted `current`; after correction, two independently fresh
+named artifact volumes had exact relative
+`current -> 7abbd93bd3e4ec01ba01f8e4581821ae1d2f35cab720695c1309596df5614a19`
+and passed `verify_current`. Diagnostic requests were exact retained 256
+printable-ASCII SmolLM values.
+
+Two fresh offline/host-PID/exact-GPU diagnostic containers ran required p=2 and
+exited 2 after 25s and 28s with no bounded stdout JSON. Owned containers and
+volumes were verified absent. The missing bounded model/stage failure envelope
+leaves the cause unresolved at the process/CLI/runtime boundary; it is not
+classified as an environment block or proven provider defect. The complete
+matrix was not started, and no `profiles.sqlite`, install, export, promotion,
+profile eligibility, or Phase 5 exit exists. All remaining Phase 5 checkboxes
+and G4.1/G4.2/G4.3 remain open/partial.
+
+Next investigation: reproduce one owned diagnostic while separately capturing
+bounded stdout/stderr and Docker exit/inspect facts, determine whether failure
+precedes main exception handling, occurs during lifecycle, or is process
+termination, and preserve no prompts/results/tracebacks. Fix only a proven code
+defect with focused tests, rerun p=2, and only then run the fresh all-or-nothing
+matrix. During transfer, preserve/create the relative `current` symlink and
+verify it with `verify_current`; the image entrypoint already invokes
+`/opt/venv/bin/python`, so Docker args begin with `/opt/llm/measure_profiles.py`.
+Diagnostic mode omits provenance; the full matrix requires it. Cleanup and
+foreign-work limits above remain mandatory.
+
+The subsequent CLI hardening now gives parsing, configuration, ordinary
+application, provider and cleanup failures deterministic bounded JSON-safe
+classification. The focused measurement-entry suite passes **19 tests**;
+compilation and `git diff --check` pass. A freshly rebuilt exact-GPU retry still
+reported exit 2 with zero captured stdout/stderr, `OOMKilled=false`, and no
+Docker runtime error. Because every normal application return-2 route writes a
+JSON line, this remains an output-capture/process-boundary contradiction rather
+than provider or capacity evidence. A decisive retained-container/log-driver
+comparison could not run: exact rebuilt manifest
+`sha256:c80f95d331c69df7f54b67895df979f7d166a7f6fe038136b2100258f1eec9fa`
+was no longer locally available. The operator must restore or reproducibly
+rebuild and verify that exact image before GPU verification resumes. No matrix,
+profile, install, export, or promotion exists; G4.1/G4.2/G4.3 remain partial.
+
+The next local continuation adds opt-in matrix tracing without changing that
+capacity status. With `--debug`, bounded JSONL goes to stderr and stdout remains
+one sanitized result. The inner trace is exclusively created in the fresh
+runtime volume, revalidated and retrieved before cleanup, and retained on a
+failed run as `<output>.debug.jsonl` without clobbering an existing sidecar.
+Central enforcement limits each record to 4 KiB, each run to 20,000 records and
+8 MiB, reserves a truncation record, rejects sensitive content and raw request/
+GPU identities, and makes trace failures non-interfering. The focused command
+
+```sh
+.venv/bin/python -W error -m unittest -v tests.unit.test_debug_trace tests.unit.test_run_measurement_matrix tests.unit.test_measure_profiles
+```
+
+passed **91 tests in 0.443s**; targeted `py_compile` and `git diff --check`
+also passed. This is unit/local operator-boundary evidence only. No new GPU run,
+matrix profile, install, export, or promotion occurred, so G4.1/G4.2/G4.3 remain
+**partial**.
+
+Actual follow-up (2026-09-21), still **failed/incomplete**: a rebuilt and
+verified current-source image with adapter identity
+`a820adef4ccb674a95771733524c5f3a2f341c75a59b9a0509786195395513d0`
+ran the exact debug matrix. SmolLM reached the configured ceiling 32. CoEdIT
+then loaded and became ready but failed before its first measurement wave with
+bounded code `maximum_witness_failed`; the then-current relay did not preserve
+which of token count, configured maximum, or payload fingerprint differed.
+Owned Docker cleanup was proved, `.compatibility/profiles.sqlite` was not
+created, and the existing sidecar was not overwritten. The new trace was
+available on stderr and did not hit the 20,000-record cap after successful
+per-request trace amplification was removed. The relay now carries the exact
+closed witness detail on the next run. Focused tracing/matrix/measurement/RM/
+provider verification passes **195 tests in 11.579s**; compilation and
+`git diff --check` pass. This is failure evidence only, not a measured profile
+or qualifying product E2E; G4.1/G4.2/G4.3 remain **partial**.
+
+## Phase 5 first-checkbox operator-boundary evidence (2026-09-18)
+
+**Unit/operator boundary**, supporting the partial G4.3 outcome that operators
+can provision useful parent-folder artifacts offline: the subprocess test in
+`tests.unit.test_artifact_volume` invokes `tools/provision_artifacts.py` from an
+independent temporary working directory and covers all three configured roots,
+concise output, content-addressed current selection, exact sets, deterministic
+rerun, and missing GECToR `verb-form-vocab.txt` failure preserving `current`.
+Fixtures are test-owned and tiny; no large JSON is inspected or copied. The
+test is evidence for this Phase 5 checkbox only, not G4.3 completion, measured
+capacity, production image approval, semantic model validation, or production
+E2E. The focused suite passed **19 tests** with warnings treated as errors
+(acceptance run 0.324s; final confirmation 0.350s); `git diff --check` also
+passed.
+
+Acceptance command:
+
+```sh
+.venv/bin/python -W error -m unittest -v tests.unit.test_artifact_volume
+```
+
+## Phase 5 provisioning precursors (2026-09-18)
+
+**Unit evidence**, supporting partial G4.1/G4.2/G4.3 outcomes: provisioning can
+route a bounded request through the actual `ResourceManager` session, admission,
+progress, timing, cancellation, cleanup and fencing lifecycle, while benchmark
+preparation returns a deeply immutable canonical identity only after one adapter
+validation bound to the exact request bucket/context. The focused suites passed
+**17 tests in 0.017s** with warnings treated as errors; `git diff --check` passed.
+
+```sh
+.venv/bin/python -W error -m unittest -v tests.unit.test_provisioning_rm_runner tests.unit.test_benchmark_requests
+```
+
+This does not prove a real adapter's maximum request, GPU measurement, an eligible
+profile, production image/runtime integration, or production-boundary E2E. The
+remaining Phase 5 checkboxes and G4.1/G4.2/G4.3 therefore remain incomplete and
+`partial`.
+
+## Phase 5 measurement and profile-persistence precursors (2026-09-18)
+
+**Unit/local integration evidence**, supporting partial G4.1/G4.2/G4.3:
+the authoritative measurement runner uses the actual `ResourceManager` path,
+an explicit non-durable provisioning admission profile, bounded exact event and
+native evidence, reserve-safe discovery, the required sweep schedule and
+cleanup-gated eligibility. The persistence integration independently validates
+the retained evidence and exact benchmark/runtime/artifact selectors before
+calling `ProfileStore.save_measured()`, then verifies exact profile/raw-sample
+rehydration. Identical replay and conflicting evidence retain the store's
+immutable semantics.
+
+```sh
+.venv/bin/python -W error -m unittest -v tests.unit.test_capacity_measurement_runner tests.unit.test_measured_profile_persistence tests.unit.test_capacity_measurement tests.unit.test_profiles tests.unit.test_provisioning_rm_runner tests.unit.test_benchmark_requests
+```
+
+**83 tests passed in 7.033s** with warnings treated as errors;
+`git diff --check` passed. This is not real-adapter/GPU measurement evidence:
+no configured model/context has gained an approved measured profile, and no
+remaining Phase 5 checkbox is closed by these local fixtures.
+
 ## Phase 0 contract closure (2026-09-17)
 
 **Unit/local integration**, supporting G1.1/G1.2/G2.1/G2.2/G3.1/G3.2/G4.1/G4.2/

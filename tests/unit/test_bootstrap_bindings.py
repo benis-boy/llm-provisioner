@@ -4,10 +4,12 @@ import hashlib
 import tempfile
 import unittest
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 
 from services.llm.bootstrap.bindings import _BUCKETS, observe_runtime_identities, prepare_bindings
+from services.llm.bootstrap.measurement_bindings import prepare_measurement_bindings
 from services.llm.bootstrap.config import BootstrapConfig, ModelConfig, load_config
 from services.llm.providers.config import GPUProof
 from services.llm.providers.gpu import ProcessIdentity
@@ -275,3 +277,44 @@ class BootstrapConfigTests(unittest.TestCase):
         model = ModelConfig("runtime", "adapter")
         with self.assertRaises(Exception):
             model.runtime_identity = "changed"
+
+
+class MeasurementBindingsProofCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_preserves_supervisor_identity_and_ownership_for_raw_or_typed_proof(self):
+        supervisor = ProcessIdentity(17, 23)
+        ownership = lambda: object()
+
+        async def identity():
+            return "GPU-test"
+
+        raw = SimpleNamespace(identity=identity, cleanup=lambda: True,
+                              residency=lambda: None, residency_for_runner=None,
+                              memory=lambda: None, supervisor_identity=supervisor,
+                              ollama_ownership=ownership)
+        typed = GPUProof(identity, raw.cleanup, raw.residency,
+                         expected_supervisor=supervisor,
+                         ollama_ownership=ownership)
+        config = type("Config", (), {
+            "gpu_uuid": "GPU-test",
+            "manifest_sha256": "a" * 64,
+            "artifact_root": Path("/artifacts"),
+            "models": {model.value: type("Model", (), {
+                "runtime_identity": "runtime",
+                "adapter_identity": "adapter",
+            })() for model in ModelId},
+            "ollama_binary": "/usr/bin/ollama",
+            "ollama_home": Path("/ollama-home"),
+            "ollama_port": 11434,
+        })()
+        hashes = {model.value: "b" * 64 for model in ModelId}
+
+        for proof in (raw, typed):
+            with self.subTest(proof=type(proof).__name__), \
+                    patch("services.llm.bootstrap.measurement_bindings._verify_and_hashes",
+                          return_value=hashes):
+                prepared = await prepare_measurement_bindings(
+                    config, proof, {model.value: "runtime" for model in ModelId}, ceiling=1)
+                for binding in prepared.bindings.values():
+                    typed_proof = binding.provider.config.gpu_proof
+                    self.assertIs(typed_proof.ollama_ownership, ownership)
+                    self.assertEqual(typed_proof.expected_supervisor, supervisor)

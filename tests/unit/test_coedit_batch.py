@@ -38,7 +38,7 @@ class CoEdITBatchTests(unittest.IsolatedAsyncioTestCase):
             ])
         observation = first.result()[1]
         from services.llm.providers.coedit_batch import AllocatorObservation
-        self.assertEqual(observation, NativeBatchObservation(2, 10, 11, True, AllocatorObservation(10, 20, 30, 40, 10, 20), (64, 64), 64))
+        self.assertEqual(observation, NativeBatchObservation(2, 10, 11, True, AllocatorObservation(10, 20, 30, 40, 10, 20), (64, 64), 64, ("r1", "r2")))
         await batcher.close()
 
     async def test_full_native_batch_preserves_32_row_cardinality_and_request_correlation(self):

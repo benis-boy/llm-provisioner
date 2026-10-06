@@ -38,6 +38,7 @@ class NativeBatchObservation:
     allocator: AllocatorObservation
     decoder_steps: tuple[int, ...] = ()
     max_output_tokens: int = 0
+    request_ids: tuple[str, ...] = ()
 
 
 class CoEdITBatcher:
@@ -145,7 +146,7 @@ class CoEdITBatcher:
                         or not isinstance(steps, list) or len(steps) != len(items)
                         or any(type(value) is not int or value < 0 or value > maximum for value in steps)):
                     raise RuntimeError("malformed CoEdIT decoder workload observation")
-                observation = NativeBatchObservation(len(items), obs["execution_started"], obs["execution_ended"], obs["cuda_synchronized"], allocator, tuple(steps), maximum)
+                observation = NativeBatchObservation(len(items), obs["execution_started"], obs["execution_ended"], obs["cuda_synchronized"], allocator, tuple(steps), maximum, tuple(item[0] for item in items))
                 for (_, _, _, future), output in zip(items, outputs):
                     if generation == self.generation and not future.done():
                         future.set_result((output, observation))

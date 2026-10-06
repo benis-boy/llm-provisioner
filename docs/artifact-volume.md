@@ -21,7 +21,15 @@ Example:
 ```sh
 python tools/provision_artifacts.py --output /srv/llm-artifacts \
   --model SmolLM=/offline/SmolLM \
-  --model CoEdIT=/offline/CoEdIT
+  --model CoEdIT=/offline/CoEdIT \
+  --model GECToR=/offline/GECToR
+```
+
+Acceptance command (**19 tests passed**, warnings treated as errors; acceptance
+run 0.324s and final confirmation 0.350s):
+
+```sh
+.venv/bin/python -W error -m unittest -v tests.unit.test_artifact_volume
 ```
 
 The command emits the digest, concise counts, and runtime paths, never the full

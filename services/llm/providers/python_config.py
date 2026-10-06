@@ -6,12 +6,16 @@ import math
 from pathlib import Path
 from .config import GPUProof
 from .gpu import ProcessIdentity
+from .coedit_batch import CoEdITBatcher
 
 
 @dataclass(frozen=True)
 class PythonProviderConfig:
     NATIVE_BATCH_DELAY_SECONDS = 0.005
-    MAX_NATIVE_BATCH_SIZE = 32
+    # The batcher is the authoritative implementation boundary for this
+    # provider capability; configuration validation and measurement identity
+    # must not drift from it.
+    MAX_NATIVE_BATCH_SIZE = CoEdITBatcher.MAX_NATIVE_BATCH_SIZE
     artifact_root: Path
     manifest_sha256: str
     model_sha256: str
@@ -20,6 +24,10 @@ class PythonProviderConfig:
     adapter_identity: str
     bucket_identity: str = "coedit:p1:input128:output64:float16:beams1:nosample"
     max_native_batch_size: int = 1
+    # Provisioning-only exploration may retain the configured selector (p=1)
+    # while exercising the normal batcher above it.  Runtime bootstrap never
+    # sets this field.
+    measurement_max_native_batch_size: int | None = None
     native_batch_delay_seconds: float = NATIVE_BATCH_DELAY_SECONDS
     max_input_tokens: int = 128
     max_output_tokens: int = 64
@@ -49,6 +57,10 @@ class PythonProviderConfig:
             raise ValueError("CoEdIT generation must be deterministic")
         if type(self.max_native_batch_size) is not int or not 1 <= self.max_native_batch_size <= self.MAX_NATIVE_BATCH_SIZE:
             raise ValueError(f"native batch size must be between 1 and {self.MAX_NATIVE_BATCH_SIZE}")
+        if self.measurement_max_native_batch_size is not None and (
+                type(self.measurement_max_native_batch_size) is not int or
+                not self.max_native_batch_size <= self.measurement_max_native_batch_size <= self.MAX_NATIVE_BATCH_SIZE):
+            raise ValueError("measurement batch ceiling must extend the configured native batch")
         if (not isinstance(self.native_batch_delay_seconds, (int, float)) or isinstance(self.native_batch_delay_seconds, bool)
                 or not math.isfinite(self.native_batch_delay_seconds) or not 0 <= self.native_batch_delay_seconds <= 1):
             raise ValueError("native batch delay must be between zero and one second")

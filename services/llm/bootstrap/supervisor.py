@@ -21,6 +21,10 @@ from .config import BootstrapConfig
 from services.llm.providers.config import GPUProof
 from services.llm.providers.gpu import ProcessIdentity, OwnedOllamaSnapshot
 from .ollama_broker_client import BrokerClient
+try:
+    from tools.compatibility.debug_trace import record as trace
+except ImportError:
+    def trace(*args, **kwargs): return None
 
 
 class OllamaSupervisorError(RuntimeError):
@@ -68,7 +72,8 @@ class OwnedOllama:
 
     def __init__(self, config: BootstrapConfig, gpu_proof: GPUProof, *,
                  startup_timeout: float = 30.0, command: list[str] | None = None,
-                 output_limit: int = 256 * 1024, launch_user: bool = False) -> None:
+                  output_limit: int = 256 * 1024, launch_user: bool = False,
+                  num_parallel: int = 1) -> None:
         if type(config) is not BootstrapConfig:
             raise TypeError("validated BootstrapConfig is required")
         if type(gpu_proof) is not GPUProof or type(gpu_proof.expected_supervisor) is not ProcessIdentity:
@@ -84,8 +89,11 @@ class OwnedOllama:
             raise ValueError("startup timeout is out of bounds")
         if type(output_limit) is not int or not 1024 <= output_limit <= 4 * 1024 * 1024:
             raise ValueError("output limit is out of bounds")
+        if type(num_parallel) is not int or not 1 <= num_parallel <= 32:
+            raise ValueError("num_parallel is out of bounds")
         self.config, self.gpu_proof = config, gpu_proof
         self.startup_timeout, self.output_limit = float(startup_timeout), output_limit
+        self.num_parallel = num_parallel
         if type(launch_user) is not bool:
             raise ValueError("launch_user must be boolean")
         self.launch_user = launch_user
@@ -153,14 +161,19 @@ class OwnedOllama:
             home.chmod(0o700)
         env.update({"PATH": env.get("PATH", "/usr/bin:/bin"), "HOME": str(home),
                     "OLLAMA_MODELS": str(models), "OLLAMA_HOST": f"127.0.0.1:{self.port}",
-                    "OLLAMA_NUM_PARALLEL": "1", "OLLAMA_MAX_LOADED_MODELS": "1"})
+                    "OLLAMA_NUM_PARALLEL": str(self.num_parallel), "OLLAMA_MAX_LOADED_MODELS": "1"})
         return env
 
     async def _drain(self, stream: asyncio.StreamReader) -> None:
         # Drain forever. Keep no prompt/log content and do not impose a lifetime quota.
         try:
-            while await stream.read(8192):
-                pass
+            total = 0
+            while True:
+                chunk = await stream.read(8192)
+                if not chunk:
+                    break
+                total += len(chunk)
+            trace("supervisor", "output", "success", byte_count=total)
         except BaseException as exc:
             self._output_failed = exc
             raise
@@ -374,6 +387,7 @@ class OwnedOllama:
         return await self._health(remaining)
 
     async def start(self) -> str:
+        trace("supervisor", "start", "enter", concurrency=self.num_parallel)
         if self._broker is not None:
             return await self._broker.start()
         async with self._state:
@@ -427,7 +441,9 @@ class OwnedOllama:
                         raise OllamaSupervisorError("Ollama output transport failed")
                     self._assert_owned()
                     try:
-                        return await self._health(deadline - time.monotonic())
+                        version = await self._health(deadline - time.monotonic())
+                        trace("supervisor", "readiness", "success")
+                        return version
                     except OllamaSupervisorError as exc:
                         if time.monotonic() >= deadline:
                             raise OllamaSupervisorError("Ollama readiness timed out") from exc
@@ -671,6 +687,7 @@ class OwnedOllama:
                 continue
 
     async def close(self) -> None:
+        trace("supervisor", "close", "enter")
         if self._broker is not None:
             await self._broker.close()
             return
@@ -690,6 +707,7 @@ class OwnedOllama:
             task.result()
         if cancelled:
             raise asyncio.CancelledError
+        trace("supervisor", "close", "success")
 
     async def alive(self) -> bool:
         if self._broker is not None:

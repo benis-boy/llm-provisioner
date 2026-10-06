@@ -9,7 +9,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from services.llm.providers.python_worker import MAX_FRAME, InputValidationError, Runtime, _read
+from services.llm.providers.python_worker import (MAX_FRAME, InputValidationError, Runtime,
+                                                  WorkerContractFailure, _execute_batch_failure_code,
+                                                  _read)
 
 
 class PythonWorkerTests(unittest.TestCase):
@@ -40,6 +42,15 @@ class PythonWorkerTests(unittest.TestCase):
             _read(self.frame(malformed))
         with self.assertRaises(RuntimeError):
             _read(self.frame(request), gector=True)
+
+    def test_execute_batch_classification_is_closed_and_uses_typed_cuda_oom(self):
+        class TypedOOM(Exception): pass
+        torch = types.SimpleNamespace(cuda=types.SimpleNamespace(OutOfMemoryError=TypedOOM))
+        self.assertEqual(_execute_batch_failure_code(TypedOOM(), torch), "oom")
+        self.assertEqual(_execute_batch_failure_code(
+            WorkerContractFailure("output_contract_failed"), torch), "output_contract_failed")
+        self.assertEqual(_execute_batch_failure_code(RuntimeError("CUDA out of memory"), torch),
+                         "worker_operation_failed")
 
     def test_cuda_ready_rpc_schema_is_strict(self):
         request = {"id": 1, "op": "cuda_ready"}

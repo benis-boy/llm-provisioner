@@ -9,6 +9,7 @@ from unittest.mock import patch
 from services.llm.provisioning.capacity import (
     MemorySample, Wave, choose_optimum, measure_capacity, discover_memory,
     CapacityEvidenceError, canonical_benchmark_payload, sample_during,
+    sample_overlaps_execution,
 )
 from services.llm.providers.coedit_batch import AllocatorObservation
 from services.llm.provisioning import capacity as capacity_module
@@ -27,6 +28,26 @@ def wave(p, n, ms=10, *, free=100):
 
 
 _sample_clock = itertools.count()
+
+
+class IntervalOverlapTests(unittest.TestCase):
+    def test_sample_intersection_is_conservative_and_shared_by_validation(self):
+        self.assertTrue(sample_overlaps_execution(
+            MemorySample(150, 100, 10, 90, 90, 150), 100, 120))
+        self.assertTrue(sample_overlaps_execution(
+            MemorySample(150, 100, 10, 90, 100, 150), 120, 200))
+        self.assertFalse(sample_overlaps_execution(
+            MemorySample(50, 100, 10, 90, 10, 50), 100, 200))
+        self.assertFalse(sample_overlaps_execution(
+            MemorySample(250, 100, 10, 90, 250, 300), 100, 200))
+
+    def test_sample_intersection_rejects_invalid_domains_and_chronology(self):
+        sample = MemorySample(150, 100, 10, 90, 150, 140)
+        self.assertFalse(sample_overlaps_execution(sample, 100, 200))
+        self.assertFalse(sample_overlaps_execution(
+            MemorySample(150, 100, 10, 90, 90, 150), -1, 200))
+        self.assertFalse(sample_overlaps_execution(
+            MemorySample(150, 100, 10, 90, 90, 150), 200, 100))
 
 
 def sampled(total=100, used=0, free=None):
@@ -439,7 +460,64 @@ class CapacityMeasurementTests(unittest.TestCase):
         chronological = asyncio.run(measure_capacity(
             lambda p, n, ids: no_overlap(p, n, ids), Backward(), max_parallelism=1, expected_max_output_tokens=64))
         self.assertEqual((chronological.failure_kind, chronological.baseline[0].failed,
-                          chronological.baseline[0].failure_kind), ("chronology", True, "chronology"))
+                           chronological.baseline[0].failure_kind), ("chronology", True, "chronology"))
+
+    def test_fast_success_without_during_sample_retains_samples_and_closed_category(self):
+        samples = iter((MemorySample(1, 100, 0, 100), MemorySample(2, 100, 0, 100),
+                        MemorySample(3, 100, 0, 100)))
+
+        class Sampler:
+            async def sample(self):
+                return next(samples)
+
+        async def action():
+            return wave(1, 1)
+
+        result = asyncio.run(sample_during(Sampler(), action, interval=1))
+        self.assertEqual(len(result.samples), 3)
+        self.assertEqual(tuple(sample.timestamp_ns for sample in result.samples), (1, 2, 3))
+
+    def test_short_action_gets_immediate_candidate_before_interval(self):
+        started = asyncio.Event()
+        candidate = asyncio.Event()
+        samples = iter((MemorySample(1, 100, 0, 100),
+                        MemorySample(1_500_000_000, 100, 0, 100),
+                        MemorySample(3, 100, 0, 100)))
+
+        class Sampler:
+            async def sample(self):
+                sample = next(samples)
+                if started.is_set() and not candidate.is_set():
+                    candidate.set()
+                return sample
+
+        async def action():
+            started.set()
+            await candidate.wait()
+            return wave(1, 1)
+
+        result = asyncio.run(sample_during(Sampler(), action, interval=60))
+        self.assertTrue(candidate.is_set())
+        self.assertEqual(len(result.samples), 3)
+        self.assertEqual(result.samples[1].timestamp_ns, 1_500_000_000)
+
+    def test_immediate_candidates_remain_bounded(self):
+        calls = 0
+
+        class Sampler:
+            async def sample(self):
+                nonlocal calls
+                calls += 1
+                return MemorySample(calls, 100, 0, 100)
+
+        async def action():
+            await asyncio.sleep(1)
+            return wave(1, 1)
+
+        with self.assertRaises(CapacityEvidenceError) as raised:
+            asyncio.run(sample_during(Sampler(), action, interval=.001, max_samples=3))
+        self.assertEqual(raised.exception.capacity_failure_kind, "sample_bound")
+        self.assertLessEqual(calls, 3)
 
     def test_pre_sample_failure_does_not_start_action(self):
         called = False

@@ -22,10 +22,30 @@ DISCOVERY_MAX_PARALLELISM = 32
 SAMPLE_INTERVAL_SECONDS = 0.01
 MAX_SAMPLES_PER_WAVE = 16384
 SAMPLE_TIMEOUT_SECONDS = 120.0
+MAX_DIAGNOSTIC_LENGTH = 160
 
 
 class CapacityEvidenceError(RuntimeError):
     """Evidence was insufficient or contradicted the measurement contract."""
+
+
+def bounded_exception_text(exc: BaseException, *, limit: int = MAX_DIAGNOSTIC_LENGTH) -> str:
+    """Return sanitized, single-line operator text without importing measurement."""
+    if type(limit) is not int or limit < 1:
+        raise ValueError("diagnostic limit must be a positive integer")
+    text = str(exc).strip()
+    text = "".join(char if char >= " " and char != "\x7f" else " " for char in text)
+    return " ".join(text.split())[:limit]
+
+
+def bounded_failure_text(code: object, message: object, *, limit: int = MAX_DIAGNOSTIC_LENGTH) -> str:
+    """Format only the bounded RM failure fields for an operator diagnostic."""
+    if type(limit) is not int or limit < 1:
+        raise ValueError("diagnostic limit must be a positive integer")
+    prefix = bounded_exception_text(RuntimeError(str(code)), limit=limit)
+    separator = ":"
+    remaining = max(0, limit - len(prefix) - len(separator))
+    return prefix + separator + bounded_exception_text(RuntimeError(str(message)), limit=remaining) if remaining else prefix
 
 
 def _retain_samples(exc: BaseException, samples: list["MemorySample"], kind: str) -> BaseException:
@@ -55,6 +75,18 @@ class MemorySample:
         return self.valid() and self.free_bytes * 100 >= self.total_bytes * RESERVE_PERCENT
 
 
+def sample_overlaps_execution(sample: MemorySample, execution_started: object,
+                               execution_ended: object) -> bool:
+    """Return whether a valid fenced sample intersects a valid execution interval."""
+    if (not sample.valid() or type(execution_started) is not int
+            or type(execution_ended) is not int or execution_started < 0
+            or execution_ended < execution_started):
+        return False
+    start = sample.timestamp_ns if sample.start_ns is None else sample.start_ns
+    end = sample.timestamp_ns if sample.end_ns is None else sample.end_ns
+    return start <= execution_ended and end >= execution_started
+
+
 @dataclass(frozen=True)
 class Wave:
     concurrency: int; wave: int; request_ids: tuple[str, ...]; elapsed_ms: int
@@ -70,6 +102,14 @@ class Wave:
     observation_drops: int = 0
     decoder_steps: tuple[int, ...] = ()
     max_output_tokens: int | None = None
+    workload_kind: str = "decoder_tokens"
+    workload_witness: tuple[int, ...] = ()
+    evidence_kind: str = "torch_native"
+    # These are authoritative provider/native intervals, keyed in request_ids
+    # order.  They are retained so persistence cannot substitute wall time for
+    # per-request latency.
+    request_latency_ms: tuple[int, ...] = ()
+    failure_detail: str | None = None
     @property
     def successful_requests(self) -> int:
         return self.concurrency if not self.failed and self.outputs_valid else 0
@@ -209,8 +249,8 @@ def _native_failure(wave: Wave, p: int, request_ids: tuple[str, ...], expected_w
     if not all(sample.valid() for sample in wave.samples): return "invalid_sample"
     if any((sample.start_ns if sample.start_ns is not None else sample.timestamp_ns) < (previous.end_ns if previous.end_ns is not None else previous.timestamp_ns)
            for previous, sample in zip(wave.samples, wave.samples[1:])): return "chronology"
-    if not any(wave.execution_started <= (sample.start_ns if sample.start_ns is not None else sample.timestamp_ns)
-               <= (sample.end_ns if sample.end_ns is not None else sample.timestamp_ns) <= wave.execution_ended for sample in wave.samples):
+    if not any(sample_overlaps_execution(sample, wave.execution_started, wave.execution_ended)
+               for sample in wave.samples):
         return "no_execution_sample"
     return None
 
@@ -231,10 +271,16 @@ async def sample_during(sampler: Sampler, action: Callable[[], Awaitable[Wave]],
     samples, stop = [pre], asyncio.Event()
     async def collect() -> None:
         while not stop.is_set() and len(samples) < max_samples - 1:
-            await asyncio.sleep(interval)
-            if not stop.is_set(): samples.append(await read())
-    collector = asyncio.create_task(collect())
+            # The action task is created first below so this candidate gets a
+            # chance to observe the provider after it has started.  Sleeping
+            # before the first candidate systematically misses short waves.
+            samples.append(await read())
+            if not stop.is_set():
+                # Keep subsequent reads bounded and interval-spaced; the
+                # immediate candidate must not turn this into a busy loop.
+                await asyncio.sleep(interval)
     action_task = asyncio.create_task(action())
+    collector = asyncio.create_task(collect())
     try:
         remaining = None if deadline is None else max(0, deadline - asyncio.get_running_loop().time())
         done, _ = await asyncio.wait((action_task, collector), timeout=remaining,
@@ -254,7 +300,12 @@ async def sample_during(sampler: Sampler, action: Callable[[], Awaitable[Wave]],
         try:
             result = action_task.result()
         except Exception as exc:
-            raise _retain_samples(exc, samples, "runner_error")
+            # The RM runner may already have classified a bounded failure (for
+            # example OOM versus a non-resource provider error).  Sampling
+            # adds telemetry; it must not erase that authoritative category.
+            kind = getattr(exc, "capacity_failure_kind",
+                           getattr(exc, "failure_kind", "runner_error"))
+            raise _retain_samples(exc, samples, kind)
     finally:
         stop.set(); collector.cancel()
         await asyncio.gather(collector, return_exceptions=True)
@@ -267,7 +318,9 @@ async def sample_during(sampler: Sampler, action: Callable[[], Awaitable[Wave]],
     except Exception as exc:
         raise _retain_samples(exc, samples, "sampler_error")
     samples.append(post)
-    if len(samples) < 3: raise CapacityEvidenceError("no during-execution memory sample")
+    if len(samples) < 3:
+        raise _retain_samples(CapacityEvidenceError("no during-execution memory sample"),
+                              samples, "no_execution_sample")
     return replace(result, samples=tuple(samples))
 
 def _points(limit: int) -> tuple[int, ...]:
@@ -330,7 +383,10 @@ async def measure_capacity(runner: WaveRunner, sampler: Sampler, *, max_parallel
             samples = getattr(exc, "capacity_samples", ())
             kind = getattr(exc, "capacity_failure_kind", "runner_error")
             return Wave(p, w, request_ids_for_wave, 0, False, 0, samples=tuple(samples),
-                        failed=True, failure_kind=kind, phase=phase), request_ids_for_wave
+                        failed=True, failure_kind=kind, phase=phase,
+                        failure_detail=(bounded_failure_text(getattr(exc, "failure_code", ""),
+                                                             getattr(exc, "failure_message", ""))
+                                        if hasattr(exc, "failure_code") else None)), request_ids_for_wave
     def chronological(item: Wave) -> bool:
         nonlocal last_observation_ns
         start = item.samples[0].start_ns if item.samples and item.samples[0].start_ns is not None else (item.samples[0].timestamp_ns if item.samples else -1)
@@ -410,6 +466,9 @@ async def discover_memory(runner: WaveRunner, sampler: Sampler, *, max_paralleli
         except (CapacityEvidenceError, asyncio.TimeoutError, RuntimeError) as exc:
             return Wave(p, w, wave_ids, 0, False, 0, samples=tuple(getattr(exc, "capacity_samples", ())),
                         failed=True, failure_kind=getattr(exc, "capacity_failure_kind", "runner_error"),
+                        failure_detail=(bounded_failure_text(getattr(exc, "failure_code", ""),
+                                                             getattr(exc, "failure_message", ""))
+                                        if hasattr(exc, "failure_code") else None),
                         phase=phase), wave_ids
 
     def check(item: Wave, expected_p: int, expected: tuple[str, ...], wave_no: int) -> str | None:
@@ -450,6 +509,8 @@ async def discover_memory(runner: WaveRunner, sampler: Sampler, *, max_paralleli
             if failure:
                 reason = "reserve_breached" if failure == "reserve" else (failure if failure == "undercovered_decoder" else "invalid_discovery")
                 points[-1] = replace(item, failed=True, failure_kind=failure)
+                if reason == "invalid_discovery" and item.failure_detail:
+                    reason = bounded_exception_text(RuntimeError(f"{reason}: {failure}:{item.failure_detail}"))
                 return finish(reason, p, "discovery", failure)
         safe = p
     return DiscoveryResult("complete", safe, max_parallelism, None, "observed_through_ceiling",

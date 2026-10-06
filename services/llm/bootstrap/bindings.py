@@ -24,15 +24,13 @@ from services.llm.providers.smollm import SmolLMProvider
 from services.llm.providers.coedit import CoEdITProvider
 from services.llm.providers.gector import GECToRProvider
 from .config import BootstrapConfig, MODEL_IDS
+from .measurement_matrix import measurement_matrix
 
 _OLLAMA = "ollama"
 # These are distribution names only.  In particular, observing GECToR must not
 # import its ML package (or torch) during bootstrap.
 _PYTHON_RUNTIME = ("torch", "transformers", "tokenizers", "safetensors", "gector")
-_BUCKETS = {
-    ModelId.COEDIT: "coedit:p1:input128:output64:float16:beams1:nosample",
-    ModelId.GECTOR: "gector:p1:tokens128:keep0:min0:iterations1:batch1:float32",
-}
+_BUCKETS = {model: selector for model, selector in measurement_matrix() if model is not ModelId.SMOLLM}
 _MODEL_FILES = {"SmolLM": "SmolLM2-1.7B-Instruct-Q8_0.gguf",
                 "CoEdIT": "model.safetensors", "GECToR": "model.safetensors"}
 

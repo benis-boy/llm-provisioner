@@ -5,3 +5,9 @@
 *.tgz
 .compatibility/context/models
 /deploy/docker/.inputs/
+*.log
+*.lock
+
+*.model
+*.gguf
+*.safetensors

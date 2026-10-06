@@ -96,7 +96,7 @@ and ledger retain prior candidate limitations.
 
 ## Phase 5 — offline provisioning and measured capacity profiles
 
-- [ ] Ingest the selected artifact set deterministically from configured
+- [x] Ingest the selected artifact set deterministically from configured
   parent-folder inputs. Copy only required files into a fresh content-addressed
   volume layer, verify hashes/transitive files, require GECToR vocabulary, and
   reject interrupted, incomplete, or changed selections. Never download.
@@ -150,6 +150,176 @@ profile with a proved memory-safe `N`, 20% reserve, tie-rule selection, and
 `m = optimal_parallelism`; runtime accepts only that exact profile and otherwise
 fails closed. No candidate image, bounded observation, or p=1 result is promoted
 to measured capacity.
+
+### Current status (2026-09-21)
+
+Artifact ingestion is the only Phase 5 checkbox complete. The artifact root
+`LLMs/g4-profile-measurement/current` currently selects manifest digest
+`7abbd93bd3e4ec01ba01f8e4581821ae1d2f35cab720695c1309596df5614a19`.
+The canonical selectors remain `smollm:context512`,
+`coedit:p1:input128:output64:float16:beams1:nosample`, and
+`gector:p1:tokens128:keep0:min0:iterations1:batch1:float32`. No current
+`profiles.sqlite` exists.
+
+The latest actual-GPU continuation again targeted exactly
+`GPU-d15a7ff9-a19b-3ece-7510-759a0bca1963`, an RTX 4070 Ti with 12,282 MiB;
+bounded preflight found no compute applications. Docker was 29.7.2. The offline
+current-source measurement image was built from verified local base digest
+`sha256:ceb56141eb754ee162f6861cd13c70b574861cb2ba729ed122332c938e46b2b4`;
+the latest image manifest is
+`sha256:8483f0c6db1c884005da1805b904409afa636d110166b968bbf5b267201352db`.
+
+The attempt found and fixed a narrow CLI defect: global argparse
+`--provenance` had incorrectly blocked non-persistent
+`--diagnostic-smollm-p2`; provenance is now required only outside diagnostic
+mode. Focused `tests.unit.test_measure_profiles` passed 10 tests in 0.035s and
+`py_compile` passed. This is local regression evidence only. The first operator
+transfer also omitted the required `current` symlink; that transfer error was
+corrected without product changes. Two independently fresh named artifact
+volumes then contained the exact relative symlink
+`current -> 7abbd93bd3e4ec01ba01f8e4581821ae1d2f35cab720695c1309596df5614a19`
+and passed `verify_current` before execution. Diagnostic requests were exact
+retained 256 printable-ASCII SmolLM values.
+
+Two fresh offline, host-PID, exact-GPU diagnostic containers ran the required
+p=2 command and exited 2 after 25s and 28s, respectively, without bounded
+stdout JSON. Owned containers and volumes were verified absent. Since no
+bounded model/stage failure envelope was emitted, the cause remains unresolved
+at the process/CLI/runtime boundary; this is neither an environment block nor
+a proven provider defect. The missing bounded failure envelope is itself the
+next investigation target. The complete matrix was correctly not started: no
+`profiles.sqlite`, install, export, or promotion exists. All remaining Phase 5
+checkboxes stay open and G4.1/G4.2/G4.3 remain partial.
+
+The CLI boundary has since been hardened so argument, configuration, ordinary
+application, provider, and cleanup failures retain one deterministic bounded
+JSON classification without exposing request data, paths, control text, or
+tracebacks. The focused suite now passes 19 tests, and compilation and
+`git diff --check` pass. A rebuilt exact-GPU retry nevertheless again exited 2
+with zero captured stdout and stderr (`OOMKilled=false`, empty Docker runtime
+error), so no provider or capacity conclusion can be drawn from it. The next
+retained-container run was stopped before execution because the exact rebuilt
+image manifest `sha256:c80f95d331c69df7f54b67895df979f7d166a7f6fe038136b2100258f1eec9fa`
+was no longer available locally. This is now an operator image-availability
+block: restore or reproducibly rebuild and verify that exact current-source
+measurement image, then compare host attachment output with `docker logs` and
+`docker inspect` for the same retained container ID before changing provider
+behavior. Phase 5 remains open; no profile database or export exists.
+
+The production machinery now exists for the canonical three-entry matrix: the
+normal ResourceManager wave runner, exact benchmark preparation and native
+evidence extraction, authoritative baseline/discovery/sweep/2%-selection,
+immutable SQLite persistence and audit, and owned Ollama lifecycle with atomic
+install. Focused local tests verify those paths, but local tests cannot approve
+capacity. The actual target for the run is GPU UUID
+`GPU-d15a7ff9-a19b-3ece-7510-759a0bca1963`, an RTX 4070 Ti with 12,282 MiB,
+driver 591.86, offline networking, and the host PID namespace. The easy
+256-byte SmolLM fixture, SHA-256
+`34118b6093639020921ad2e46e06332c7bf24c3d70c9e165fa3b4840367d3d70`, has
+been proven to produce native `eval_count == 64` with `context512/predict64/temp0`.
+
+The repeated matrix run remains fail closed during SmolLM p>1 discovery:
+`invalid discovery: runner_error:provider_execution_failed:worker operation
+failed: worker_operation_failed`. It did not create, export, or promote a
+profile database, and its all-or-nothing sequencing did not reach the later
+models. A subsequent bounded exact-GPU CoEdIT diagnostic through the normal
+provider and RM passed provider-class, start/readiness, `validate_input`, exact
+benchmark-count/max `128`, one p=1 execution, and native-evidence checks. It did
+not reproduce the generic failure; this narrows the blocker but does not prove
+CoEdIT capacity.
+
+The remaining investigation is deliberately strict. It must prove native
+correlation and workload execution, not merely semantic output grading; fixtures
+may be easy while telemetry remains exact. Current errors lose model, stage, and
+inner-provider specificity, so `worker_operation_failed` is not actionable and
+does not fit the direct SmolLM/Ollama observations. Add only safe, bounded
+tracing before changing behavior. Concurrency must be genuine native overlap:
+the configured ceiling is not `N`, and unsupported or failing p>1 remains
+ineligible. The 20% reserve requires a genuine `N` or resource-bound `N+1`; an
+operator ceiling is never promoted. Lifecycle cleanup and all-or-nothing
+registry installation also mean later-model evidence may intentionally be
+absent. On this Docker Desktop setup, bind mounts are unreliable: use unique
+`llm-g4-*` named volumes and `docker cp`, and never touch foreign GPU,
+container, or process work.
+
+The matrix runner now has opt-in bounded diagnostic tracing. With `--debug`,
+the outer and inner lifecycle records are emitted as JSONL on stderr while
+stdout remains the existing single sanitized JSON result. The inner trace is
+created exclusively in the fresh runtime volume and retrieved before cleanup;
+failed runs retain `<output>.debug.jsonl` without overwriting an existing
+sidecar. Both production and retrieval boundaries enforce 4 KiB per record,
+20,000 records, and 8 MiB total with a truncation event. The closed schema
+rejects request/prompt/output/response/exception/traceback/token/environment/path
+content and raw request/GPU identities, and trace failures cannot fail the
+measurement. Focused tracing, matrix-runner, and measurement-entry tests pass
+91 tests; compilation and whitespace checks pass. This is diagnostic
+infrastructure only: no new GPU matrix was run, no profile was produced, every
+remaining Phase 5 checkbox stays open, and G4.1/G4.2/G4.3 remain partial.
+
+The exact current-source image was then rebuilt and verified with adapter
+identity `a820adef4ccb674a95771733524c5f3a2f341c75a59b9a0509786195395513d0`.
+The requested debug matrix completed SmolLM observations through the configured
+ceiling of 32, then failed closed after CoEdIT load/readiness but before its first
+measurement wave with `maximum_witness_failed`. Owned Docker cleanup was proved,
+no profile database was retained, and the pre-existing debug sidecar was
+correctly not overwritten; the new trace remained available on stderr. The
+failure boundary now distinguishes the closed CoEdIT token-count, configured-
+maximum, and payload-fingerprint witness categories and relays them safely on a
+subsequent run. Per-request successful trace amplification was removed while all
+failures and lifecycle/wave boundaries remain, preventing the earlier 20,000-
+record exhaustion. Focused verification now passes 195 tests. The specific
+CoEdIT witness predicate still requires one fresh rebuilt run to identify, so
+Phase 5 remains open and no capacity result is eligible.
+
+### Next concentration
+
+1. Rebuild the adapter image from verified inputs, then run the fresh
+   all-or-nothing three-entry matrix with `--debug` and the exact target GPU.
+   Inspect stderr and, on failure, the exclusively retained
+   `.compatibility/profiles.sqlite.debug.jsonl` for the last safe model, phase,
+   concurrency, wave, lifecycle operation, and bounded failure classification.
+2. Fix only if the trace proves a code defect, with focused tests, then rerun
+   the complete fresh matrix. Do not turn diagnostic output or a partial matrix
+   into capacity evidence.
+3. Do not resume, export, or promote partial temporary results.
+
+### Practical continuation guide
+
+1. Before rebuilding, verify the retained compatibility base-image identity and
+   the prepared `.compatibility/adapter-deps/requirements.lock` and `wheelhouse/`
+   inputs; this candidate Dockerfile does not create or approve those inputs.
+   Then rebuild offline, naming the already-verified local base explicitly:
+
+   ```sh
+   docker build --network=none \
+     --build-arg BASE_IMAGE=<verified-local-base> \
+     -f tools/compatibility/Dockerfile.adapter \
+     -t llm-compatibility-adapter:measure-profiles .
+   ```
+2. Preflight the exact GPU UUID and owned-name namespace. If foreign GPU compute
+   work is active, record the bounded fact and abort the uncontended measurement
+   without inspecting, stopping, or controlling it. Then create fresh uniquely
+   named volumes, transfer inputs with `docker cp`, preserving/creating the
+   selected artifact tree's relative `current` symlink and verifying it with
+   `verify_current`. Run with `--network=none`, host PID, and the exact UUID.
+   Do not reuse partial or foreign state. The image entrypoint already invokes
+   `/opt/venv/bin/python`, so Docker arguments begin with
+   `/opt/llm/measure_profiles.py`, not a second interpreter. Diagnostic mode
+   omits `--provenance`; the full matrix requires it.
+3. Rerun the complete three-entry matrix sequentially. Do not resume, export,
+   or promote partial temporary results. Capacity stays fail closed unless all
+   required evidence and all three entries are eligible.
+4. Only after that succeeds, close providers and the owned daemon, checkpoint,
+   perform a read-only audit of the exact matrix and invariants, atomically
+   install the immutable database, export the audited copy, set and verify mode
+   `0444` on that exported copy, and then update the checklist, goal, and proof
+   documents. The current atomic installer does not itself set the export mode.
+   Until then, leave every new checkbox open.
+
+Testing execution is delegated per project process. The delegated operator must
+record the exact commands and their results, including failures and retained
+bounded evidence, rather than treating this continuation guide as execution
+evidence.
 
 ## Phase 6 — production-boundary proof and operations
 

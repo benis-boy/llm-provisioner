@@ -15,6 +15,11 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+try:
+    from tools.compatibility.debug_trace import record as trace
+except ImportError:
+    def trace(*args, **kwargs):
+        return None
 
 from services.llm.queue.contracts import ModelId
 from services.llm.resource_manager.contracts import CapacityProfile, SampleMetadata
@@ -357,14 +362,61 @@ class ProfileStore:
             raise
 
     def save_measured(self, profile: CapacityProfile, metadata: BenchmarkMetadata) -> None:
+        trace("profile_store", "save", "enter", model=profile.model_id.value)
         self._record(profile, metadata, "measured")
+        trace("profile_store", "save", "success", model=profile.model_id.value)
 
     def save_draft(self, profile: CapacityProfile, metadata: BenchmarkMetadata) -> None:
         self._record(profile, metadata, "draft")
 
+    def validate_all_measured(self, expected_profile_identities: set[str] | frozenset[str]) -> tuple[CapacityProfile, ...]:
+        """Rehydrate and validate every stored row through the public boundary.
+
+        This is intentionally read-only in behavior: it neither repairs rows nor
+        promotes drafts.  It is suitable for the writer-close/read-only audit
+        performed by provisioning operators.
+        """
+        trace("profile_store", "audit", "enter", count=len(expected_profile_identities) if isinstance(expected_profile_identities, (set, frozenset)) else None)
+        if not isinstance(expected_profile_identities, (set, frozenset)):
+            raise TypeError("expected profile identities must be a set")
+        try:
+            integrity = self._db.execute("PRAGMA integrity_check").fetchone()
+            foreign = self._db.execute("PRAGMA foreign_key_check").fetchall()
+            if integrity is None or integrity[0] != "ok" or foreign:
+                raise CorruptProfileStore("profile registry integrity check failed")
+            orphan = self._db.execute("SELECT count(*) FROM profile_samples s LEFT JOIN profiles p ON p.profile_identity=s.profile_identity WHERE p.profile_identity IS NULL").fetchone()[0]
+            if orphan:
+                raise CorruptProfileStore("orphan profile samples are present")
+            rows = self._db.execute(
+                "SELECT profile_identity, status, model_id, gpu_uuid, artifact_manifest_hash, "
+                "model_hash, runtime_identity, adapter_identity, context_size, bucket_identity "
+                "FROM profiles ORDER BY profile_identity").fetchall()
+        except sqlite3.DatabaseError as exc:
+            raise CorruptProfileStore("profile rows are unreadable") from exc
+        if any(row["status"] != "measured" for row in rows):
+            raise CorruptProfileStore("draft or unknown profile row is present")
+        actual = {row["profile_identity"] for row in rows}
+        if actual != set(expected_profile_identities):
+            raise CorruptProfileStore("stored profile identities differ from expected matrix")
+        profiles = []
+        for row in rows:
+            profile = self.lookup(
+                ModelId(row["model_id"]), row["gpu_uuid"],
+                row["artifact_manifest_hash"], row["model_hash"],
+                row["runtime_identity"], row["adapter_identity"],
+                context_size=row["context_size"],
+                bucket_identity=row["bucket_identity"],
+                profile_identity=row["profile_identity"],
+            )
+            if profile is None or profile.profile_identity != row["profile_identity"]:
+                raise CorruptProfileStore("measured profile could not be rehydrated")
+            profiles.append(profile)
+        trace("profile_store", "audit", "success", count=len(profiles))
+        return tuple(profiles)
+
     def lookup(self, model_id: ModelId, gpu_uuid: str, artifact_manifest_hash: str, model_hash: str,
                runtime_identity: str, adapter_identity: str, *, context_size: int | None = None,
-               bucket_identity: str | None = None) -> CapacityProfile | None:
+               bucket_identity: str | None = None, profile_identity: str | None = None) -> CapacityProfile | None:
         if isinstance(context_size, bool) or (context_size is not None and _integer(context_size, "context_size", minimum=1) < 1):
             raise ValueError("context_size must be positive")
         if context_size is not None and bucket_identity is not None:
@@ -376,7 +428,12 @@ class ProfileStore:
                 if ModelId(model_id) != ModelId.SMOLLM:
                     self._db.execute("ROLLBACK")
                     return None
-                rows = self._db.execute("SELECT *, length(metadata_json) AS metadata_bytes FROM profiles WHERE status='measured' AND model_id=? AND gpu_uuid=? AND artifact_manifest_hash=? AND model_hash=? AND runtime_identity=? AND adapter_identity=? AND context_size>=? ORDER BY context_size, profile_identity LIMIT 2", (*params, context_size)).fetchall()
+                query = "SELECT *, length(metadata_json) AS metadata_bytes FROM profiles WHERE status='measured' AND model_id=? AND gpu_uuid=? AND artifact_manifest_hash=? AND model_hash=? AND runtime_identity=? AND adapter_identity=? AND context_size>=? ORDER BY context_size, profile_identity LIMIT 2"
+                values = (*params, context_size)
+                if profile_identity is not None:
+                    query = query.replace("context_size>=? ORDER BY context_size, profile_identity LIMIT 2", "profile_identity=? AND context_size=?")
+                    values = (profile_identity, *params, context_size)
+                rows = self._db.execute(query, values).fetchall()
             else:
                 if not bucket_identity:
                     self._db.execute("ROLLBACK")
@@ -384,7 +441,12 @@ class ProfileStore:
                 if ModelId(model_id) == ModelId.SMOLLM:
                     self._db.execute("ROLLBACK")
                     return None
-                rows = self._db.execute("SELECT *, length(metadata_json) AS metadata_bytes FROM profiles WHERE status='measured' AND model_id=? AND gpu_uuid=? AND artifact_manifest_hash=? AND model_hash=? AND runtime_identity=? AND adapter_identity=? AND bucket_identity=? ORDER BY profile_identity LIMIT 2", (*params, bucket_identity)).fetchall()
+                query = "SELECT *, length(metadata_json) AS metadata_bytes FROM profiles WHERE status='measured' AND model_id=? AND gpu_uuid=? AND artifact_manifest_hash=? AND model_hash=? AND runtime_identity=? AND adapter_identity=? AND bucket_identity=? ORDER BY profile_identity LIMIT 2"
+                values = (*params, bucket_identity)
+                if profile_identity is not None:
+                    query = query.replace("ORDER BY profile_identity LIMIT 2", "AND profile_identity=?")
+                    values = (*params, bucket_identity, profile_identity)
+                rows = self._db.execute(query, values).fetchall()
             if len(rows) > 1 and (context_size is None or rows[0]["context_size"] == rows[1]["context_size"]):
                 raise CorruptProfileStore("ambiguous measured profile identity")
             row = rows[0] if rows else None

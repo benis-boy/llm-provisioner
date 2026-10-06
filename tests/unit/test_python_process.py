@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from services.llm.providers.config import GPUProof
 from services.llm.providers.gpu import ProcessIdentity
-from services.llm.providers.python_process import PythonWorker, WorkerRequestValidationError
+from services.llm.providers.python_process import PythonWorker, WorkerFailure, WorkerRequestValidationError
 
 
 def proof(clean=True):
@@ -51,7 +51,8 @@ h=sys.stdin.buffer.read(4); n=struct.unpack(">I",h)[0]; q=json.loads(sys.stdin.b
 h=sys.stdin.buffer.read(4);q=json.loads(sys.stdin.buffer.read(struct.unpack(">I",h)[0]));b=json.dumps({"id":q["id"],"ok":False,"error":"gpu_mig_api_unavailable"}).encode();sys.stdout.buffer.write(struct.pack(">I",len(b))+b);sys.stdout.buffer.flush()'''
         worker=self.worker(script)
         await worker.start()
-        with self.assertRaisesRegex(RuntimeError,"gpu_mig_api_unavailable"): await worker.call("gpu_identity")
+        with self.assertRaises(WorkerFailure) as raised: await worker.call("gpu_identity")
+        self.assertEqual(raised.exception.failure.code, "gpu_mig_api_unavailable")
 
     async def test_execute_batch_validation_error_is_recoverable(self):
         script = '''import json,struct,sys
@@ -76,6 +77,29 @@ sys.stdout.buffer.write(struct.pack(">I",len(b))+b);sys.stdout.buffer.flush()'''
         await worker.start()
         with self.assertRaisesRegex(RuntimeError, "worker operation failed"):
             await worker.call("load")
+        self.assertIsNone(worker.process)
+
+    async def test_known_child_failure_is_typed_and_poisons_worker(self):
+        script = '''import json,struct,sys
+h=sys.stdin.buffer.read(4);q=json.loads(sys.stdin.buffer.read(struct.unpack(">I",h)[0]))
+b=json.dumps({"id":q["id"],"ok":False,"error":"output_contract_failed"}).encode()
+sys.stdout.buffer.write(struct.pack(">I",len(b))+b);sys.stdout.buffer.flush()'''
+        worker = self.worker(script)
+        await worker.start()
+        with self.assertRaises(WorkerFailure) as raised:
+            await worker.call("execute_batch", items=[])
+        self.assertEqual(raised.exception.failure.code, "output_contract_failed")
+        self.assertIsNone(worker.process)
+
+    async def test_unknown_child_failure_code_is_rejected_and_poisons_worker(self):
+        script = '''import json,struct,sys
+h=sys.stdin.buffer.read(4);q=json.loads(sys.stdin.buffer.read(struct.unpack(">I",h)[0]))
+b=json.dumps({"id":q["id"],"ok":False,"error":"future_provider_detail"}).encode()
+sys.stdout.buffer.write(struct.pack(">I",len(b))+b);sys.stdout.buffer.flush()'''
+        worker = self.worker(script)
+        await worker.start()
+        with self.assertRaisesRegex(RuntimeError, "malformed worker response"):
+            await worker.call("execute_batch", items=[])
         self.assertIsNone(worker.process)
 
     async def test_cleanup_failure_retains_ownership_fences(self):

@@ -16,6 +16,7 @@ ResidencyProbe = Callable[[], ResidencyEvidence | Awaitable[ResidencyEvidence]]
 ExpectedRunnerResidencyProbe = Callable[[ProcessIdentity], ResidencyEvidence | Awaitable[ResidencyEvidence]]
 MemoryProbe = Callable[[], GPUMemoryObservation | Awaitable[GPUMemoryObservation]]
 OllamaOwnershipProbe = Callable[[], OwnedOllamaSnapshot | Awaitable[OwnedOllamaSnapshot]]
+SMOLLM_MAX_PARALLELISM = 32
 
 
 @dataclass(frozen=True)
@@ -79,8 +80,8 @@ class SmolLMProviderConfig:
             raise ValueError("only the proved 512-token SmolLM context is supported")
         if not contexts or any(type(x) is not int or x < 1 for x in contexts):
             raise ValueError("allowed context sizes must be positive integers")
-        if type(self.parallelism) is not int or self.parallelism < 1:
-            raise ValueError("parallelism must be positive")
+        if (type(self.parallelism) is not int or not 1 <= self.parallelism <= SMOLLM_MAX_PARALLELISM):
+            raise ValueError(f"parallelism must be between 1 and {SMOLLM_MAX_PARALLELISM}")
         if type(self.ollama_port) is not int or self.ollama_port < 1 or self.ollama_port > 65535:
             raise ValueError("invalid loopback port")
         if (isinstance(self.request_timeout_seconds, bool) or

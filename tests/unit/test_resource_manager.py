@@ -7,7 +7,7 @@ from collections import deque
 from services.llm.queue.contracts import ModelId
 from services.llm.resource_manager.contracts import CapacityProfile, SampleMetadata
 from services.llm.resource_manager.core import ResourceManager, ResourceManagerError
-from services.llm.resource_manager.protocol import EventKind, ProviderResponse
+from services.llm.resource_manager.protocol import EventKind, Failure, ProviderResponse
 from services.llm.providers.python_process import WorkerRequestValidationError
 
 
@@ -136,14 +136,21 @@ class ResourceManagerTests(unittest.IsolatedAsyncioTestCase):
                                                         idempotency_key="start"))
         await entered.wait()
         try:
-            with self.assertRaises(ResourceManagerError) as failure:
+            with self.assertRaises(BaseExceptionGroup) as failure:
                 await loading
-            self.assertEqual(failure.exception.failure.code, "cleanup_timeout")
+            startup, cleanup = failure.exception.exceptions
+            self.assertEqual(startup.failure.code, "lifecycle_timeout")
+            self.assertEqual(startup.lifecycle_phase, "load")
+            self.assertEqual(startup.lifecycle_subreason, "timeout")
+            self.assertEqual(cleanup.failure.code, "cleanup_timeout")
+            self.assertEqual(cleanup.startup_lifecycle_phase, "load")
+            self.assertEqual(cleanup.startup_lifecycle_subreason, "timeout")
             # Initial-load failure is never an exposed session token.  Cleanup
             # failure closes the manager permanently, even when the owned load
             # eventually returns.
             self.assertIsNone(rm._session)
             self.assertFalse(rm._available)
+            self.assertEqual(rm.snapshot().phase, "cleanup_failed")
             replacement = FakeProvider()
             with self.assertRaises(ResourceManagerError):
                 await rm.start_session("new", ModelId.COEDIT, profile(ModelId.COEDIT), replacement,
@@ -336,6 +343,25 @@ class ResourceManagerTests(unittest.IsolatedAsyncioTestCase):
                         if event.failure is not None)
         self.assertFalse(failure.retryable)
 
+    async def test_wrapped_structured_provider_failure_preserves_closed_code(self):
+        class Wrapped(FakeProvider):
+            async def execute(self, request_id, payload):
+                typed = RuntimeError("bounded provider failure")
+                typed.failure = Failure("ollama_json_response", "bounded", False)
+                raise ExceptionGroup("task wrapper", [typed])
+
+        provider = Wrapped()
+        rm = ResourceManager()
+        session = await rm.start_session("s", ModelId.SMOLLM, profile(), provider,
+                                         idempotency_key="s")
+        await rm.submit(session.session_token, "r", "a", b"x", idempotency_key="r",
+                        context_size=128)
+        await asyncio.sleep(.01)
+        failure = next(event.failure for event in reversed(rm._events[session.session_token])
+                       if event.failure is not None)
+        self.assertEqual(failure.code, "ollama_json_response")
+        self.assertFalse(failure.retryable)
+
     async def test_incomplete_timing_is_null(self):
         class Incomplete(FakeProvider):
             async def execute(self, request_id, payload): return ProviderResponse(b"x", 99, False)
@@ -393,6 +419,13 @@ class ResourceManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_provider_complete_negative_timing_is_malformed(self):
         class Malformed(FakeProvider):
             async def execute(self, request_id, payload): return ProviderResponse(b"x", -1, True)
+        provider = Malformed(); rm = ResourceManager(); session = await rm.start_session("s", ModelId.SMOLLM, profile(), provider, idempotency_key="s")
+        await rm.submit(session.session_token, "r", "a", b"x", idempotency_key="r", context_size=128); await asyncio.sleep(.01)
+        self.assertEqual(rm._events[session.session_token][-1].failure.code, "malformed_provider_response")
+
+    async def test_provider_incomplete_timing_value_is_malformed(self):
+        class Malformed(FakeProvider):
+            async def execute(self, request_id, payload): return ProviderResponse(b"x", 0, False)
         provider = Malformed(); rm = ResourceManager(); session = await rm.start_session("s", ModelId.SMOLLM, profile(), provider, idempotency_key="s")
         await rm.submit(session.session_token, "r", "a", b"x", idempotency_key="r", context_size=128); await asyncio.sleep(.01)
         self.assertEqual(rm._events[session.session_token][-1].failure.code, "malformed_provider_response")

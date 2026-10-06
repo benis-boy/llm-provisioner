@@ -1,6 +1,6 @@
 """Child-only GECToR runtime; framing, GPU identity, and lifecycle are shared."""
 from __future__ import annotations
-import json, math, tempfile
+import json, math, tempfile, hashlib
 from pathlib import Path
 from . import python_worker
 
@@ -65,16 +65,41 @@ class Runtime(python_worker.Runtime):
                 or type(batch_size) is not int or batch_size!=1): raise ValueError("request does not match GECToR bucket")
         return self._preprocess(texts[0]) is not None
     def validate(self,**values): return {"accepted": self._check(**values)}
+    def benchmark_input(self, **values):
+        if not self._check(**values): raise ValueError("request exceeds no-truncation bucket")
+        encoded = self._preprocess(values["texts"][0])
+        ids = encoded["input_ids"] if isinstance(encoded, dict) else getattr(encoded, "input_ids", None)
+        count = len(ids[0]) if hasattr(ids, "__getitem__") else 0
+        if count != self.config["max_subword_tokens"]: raise ValueError("insufficient_max_input")
+        payload = json.dumps(values, sort_keys=True, separators=(",", ":")).encode()
+        return {"count": count, "max": self.config["max_subword_tokens"], "fingerprint": hashlib.sha256(payload).hexdigest()}
     def execute(self,**values):
-        import torch
+        import time, torch
         from gector import predict
         if not self._check(**values): raise RuntimeError("execution input exceeds no-truncation bucket")
+        cuda = torch.cuda
+        if not callable(getattr(cuda, "synchronize", None)):
+            raise RuntimeError("CUDA synchronization is required for measurement")
+        allocator = (cuda.memory_allocated(0), cuda.memory_reserved(0))
+        if any(type(value) is not int for value in allocator):
+            raise RuntimeError("invalid CUDA allocator baseline")
+        cuda.reset_peak_memory_stats(0); cuda.synchronize(); started = time.monotonic_ns()
         with torch.inference_mode(): result=predict(self.model,self.tokenizer,values["texts"],self.encode,self.decode,keep_confidence=values["keep_confidence"],min_error_prob=values["min_error_prob"],n_iteration=values["n_iteration"],batch_size=values["batch_size"])
+        cuda.synchronize(); ended = time.monotonic_ns()
+        peak = (cuda.max_memory_allocated(0), cuda.max_memory_reserved(0))
+        final = (cuda.memory_allocated(0), cuda.memory_reserved(0))
         if not isinstance(result,list) or len(result)!=1 or not isinstance(result[0],str) or not result[0].strip(): raise RuntimeError("invalid aligned output")
         try:
             if self._preprocess(result[0]) is None:
                 raise ValueError("GECToR output exceeds no-truncation bucket")
         except (ValueError, RuntimeError) as exc: raise RuntimeError("output exceeds or violates GECToR bucket") from exc
-        return result
+        return {"outputs": result, "observation": {
+            "batch_size": 1, "execution_started": started, "execution_ended": ended,
+            "cuda_synchronized": True, "allocator": {
+                "baseline_allocated": allocator[0], "baseline_reserved": allocator[1],
+                "peak_allocated": peak[0], "peak_reserved": peak[1],
+                "final_allocated": final[0], "final_reserved": final[1]},
+            "decoder_steps": [1], "max_output_tokens": 1,
+        }}
 
 if __name__=="__main__": raise SystemExit(python_worker.main(Runtime,True))

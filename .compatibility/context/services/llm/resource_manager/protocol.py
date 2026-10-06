@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import AsyncIterator, Protocol
+from typing import Any, AsyncIterator, Protocol
 
 from services.llm.queue.contracts import ModelId
 from services.llm.resource_manager.contracts import CapacityProfile
@@ -71,6 +71,7 @@ class ProgressEvent:
     failure: Failure | None = None
     time_on_gpu_ms: int | None = None
     gpu_timing_complete: bool = False
+    observation: Any = None
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,7 @@ class ProviderResponse:
     result: bytes
     time_on_gpu_ms: int | None = None
     gpu_timing_complete: bool = False
+    observation: Any = None
 
 
 class Provider(Protocol):

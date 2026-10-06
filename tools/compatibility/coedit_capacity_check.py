@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
 
 from services.llm.provisioning.capacity import (CapacityEvidenceError, MemorySample, Wave, measure_capacity,
-    discover_memory, THROUGHPUT_MAX_PARALLELISM, DISCOVERY_MAX_PARALLELISM)
+    discover_memory, sample_overlaps_execution, THROUGHPUT_MAX_PARALLELISM, DISCOVERY_MAX_PARALLELISM)
 from services.llm.providers.coedit_batch import AllocatorObservation
 from services.llm.provisioning.volume import provision
 from services.llm.providers.coedit import CoEdITProvider
@@ -160,9 +160,7 @@ def _raw(result):
         allocator = None if w.allocator is None else {key: getattr(w.allocator, key) for key in ("baseline_allocated", "baseline_reserved", "peak_allocated", "peak_reserved", "final_allocated", "final_reserved")}
         samples = w.samples
         valid = [s for s in samples if s.valid()]
-        overlap = [s for s in valid if type(w.execution_started) is int and type(w.execution_ended) is int
-                   and w.execution_started <= (s.start_ns if s.start_ns is not None else s.timestamp_ns)
-                   <= (s.end_ns if s.end_ns is not None else s.timestamp_ns) <= w.execution_ended]
+        overlap = [s for s in valid if sample_overlaps_execution(s, w.execution_started, w.execution_ended)]
         witness = overlap[0] if overlap else None
         def point(s): return None if s is None else {"start_ns": s.start_ns, "end_ns": s.end_ns, "timestamp_ns": s.timestamp_ns, "total_bytes": s.total_bytes, "used_bytes": s.used_bytes, "free_bytes": s.free_bytes}
         return {"p": w.concurrency, "wave": w.wave, "phase": w.phase, "request_count": len(w.request_ids), "elapsed_ms": w.elapsed_ms, "native_batch_size": w.native_batch_size, "outputs_valid": w.outputs_valid, "failed": w.failed, "failure_kind": w.failure_kind, "execution_started_ns": w.execution_started, "execution_ended_ns": w.execution_ended, "allocator": allocator, "decoder_workload": {"steps": list(w.decoder_steps), "max_output_tokens": w.max_output_tokens}, "native_observation": {"count": w.observation_count, "batch_sizes": list(w.observed_native_batch_sizes), "request_correlation": w.native_request_correlation, "drops": w.observation_drops}, "sample_summary": {"count": len(samples), "valid_count": len(valid), "overlap_count": len(overlap), "first_start_ns": samples[0].start_ns if samples else None, "last_end_ns": samples[-1].end_ns if samples else None, "total_bytes": samples[0].total_bytes if samples else None, "min_free_bytes": min((s.free_bytes for s in samples), default=None), "max_used_bytes": max((s.used_bytes for s in samples), default=None), "first_in_window": point(witness)}}

@@ -69,7 +69,11 @@ never starts `ollama serve`, and only
 uses the configured IPv4 loopback endpoint without redirects. Generation is a
 raw framed request with explicit `num_ctx=512`, `num_predict=64`, temperature
 zero, and keep-alive settings; ordinary Ollama metadata is tolerated while the
-required completion and prompt-count proof is strict.
+required completion and prompt-count proof is strict. Evidence binds the
+configured options to the exact request body and retains actual `eval_count` as
+the workload witness. Counts from 1 through 64 are valid because natural EOS
+may stop below the configured maximum-output ceiling; an optional `done_reason`
+is accepted only when it is a known bounded value.
 
 The local `ollama create` subprocess has a bounded aggregate stdout/stderr
 drain, timeout, and process-group reap. A failed import remains adapter-owned

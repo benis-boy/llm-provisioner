@@ -44,6 +44,18 @@ class ProfileStoreTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_full_audit_rejects_orphan_sample(self):
+        profile, metadata = fixture()
+        with ProfileStore(self.path) as store:
+            store.save_measured(profile, metadata)
+        db = sqlite3.connect(self.path)
+        db.execute("PRAGMA foreign_keys=OFF")
+        db.execute("INSERT INTO profile_samples VALUES (?,?,?)", ("orphan", 0, "{}"))
+        db.commit(); db.close()
+        with ProfileStore.open_readonly(self.path) as store:
+            with self.assertRaises(CorruptProfileStore):
+                store.validate_all_measured({profile.profile_identity})
+
     def test_reopen_and_smallest_context_lookup(self):
         with ProfileStore(self.path) as store:
             for context in (4096, 2048):

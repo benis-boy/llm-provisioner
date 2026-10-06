@@ -64,9 +64,21 @@ class GECToRWorkerTests(unittest.TestCase):
         runtime.encode, runtime.decode = object(), object()
         runtime.tokenizer.calls.clear()
         fake_gector = types.SimpleNamespace(predict=lambda *a, **k: ["corrected"])
-        torch = types.SimpleNamespace(inference_mode=lambda: contextlib.nullcontext())
+        torch = types.SimpleNamespace(
+            inference_mode=lambda: contextlib.nullcontext(),
+            cuda=types.SimpleNamespace(
+                synchronize=lambda: None,
+                memory_allocated=lambda _: 10,
+                memory_reserved=lambda _: 20,
+                reset_peak_memory_stats=lambda _: None,
+                max_memory_allocated=lambda _: 30,
+                max_memory_reserved=lambda _: 40,
+            ),
+        )
         with patch.dict(__import__("sys").modules, {"torch": torch, "gector": fake_gector}):
-            self.assertEqual(runtime.execute(texts=["one"], keep_confidence=0.0, min_error_prob=0.0, n_iteration=1, batch_size=1), ["corrected"])
+            result = runtime.execute(texts=["one"], keep_confidence=0.0, min_error_prob=0.0, n_iteration=1, batch_size=1)
+            self.assertEqual(result["outputs"], ["corrected"])
+            self.assertEqual(result["observation"]["batch_size"], 1)
         self.assertGreaterEqual(len(runtime.tokenizer.calls), 2)
 
     def test_load_sets_bucket_before_model_load_and_restores_patches_on_success_and_failure(self):

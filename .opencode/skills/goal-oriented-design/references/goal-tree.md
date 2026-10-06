@@ -159,8 +159,14 @@ evidence for this SmolLM path; CoEdIT, GECToR, full switching/cancellation, and
 production deployment coverage remain incomplete.
 An unwired read-only health HTTP precursor now has local contract evidence for
 bounded probes, safe diagnostics and fail-closed injected readiness snapshots;
-it does not establish production bootstrap or GPU readiness. Capacity-measurement
-HTTP bindings, complete production adapters/image, actual measured capacity profiles and
+it does not establish production bootstrap or GPU readiness. Provisioning now has
+bounded precursors that route one benchmark request through the actual
+ResourceManager lifecycle and prepare immutable, exact-bucket benchmark identities
+only with adapter validation. The bounded measurement runner and immutable
+`ProfileStore.save_measured()` integration now have local actual-ResourceManager
+and SQLite evidence; 83 focused tests pass. Real-adapter maximum request/native
+attestation, GPU runs for every model/context, capacity-measurement HTTP bindings,
+complete production adapters/image, approved measured capacity profiles and
 qualifying production-boundary E2E remain absent. All leaves remain partial.
 
 The installable CoEdIT isolated adapter now also has candidate real-boundary
@@ -274,3 +280,44 @@ This is not inference, NVML/residency, measured readiness or deployment approval
 Complete privileged import-tree verification and broker-loss descendant
 containment remain release blockers; G0/G2.2/G4.1/G4.3 remain **partial**.
 See [candidate boundary and gates](../../../../docs/production-image-foundation.md#distinct-user-broker-continuation-2026-09-17).
+
+Latest Phase 5 continuation remains incomplete: the exact RTX 4070 Ti target
+had no compute applications at bounded preflight, and the offline measurement
+image was rebuilt from a verified local base. A narrow CLI correction now makes
+`--provenance` required only outside diagnostic mode; its focused local tests
+passed. Two fresh transferred artifact volumes passed `verify_current` after
+the required relative `current` symlink was corrected, but two exact-GPU
+SmolLM p=2 diagnostic containers exited 2 after 25s/28s without a bounded
+stdout failure envelope. The cause is unresolved at the process/CLI/runtime
+boundary, not classified as an environment block or provider defect. The
+matrix was not started, no profile exists, and no eligibility or Phase 5 exit
+is claimed. G4.1/G4.2/G4.3 remain **partial**.
+
+The diagnostic CLI now bounds and sanitizes parsing, configuration, ordinary
+application, provider and cleanup failures; 19 focused tests, compilation and
+whitespace checks pass. A rebuilt exact-GPU retry still exited 2 with zero
+captured output and no OOM/runtime error, leaving an unresolved capture/process
+boundary rather than capacity evidence. The decisive retained-container retry
+is blocked because exact rebuilt manifest
+`sha256:c80f95d331c69df7f54b67895df979f7d166a7f6fe038136b2100258f1eec9fa`
+is no longer available locally. No matrix or profile exists. G0/G4.1/G4.2/G4.3
+remain **partial** and Phase 5 remains open.
+
+Phase 5 matrix diagnostics now provide opt-in, bounded, secret-free JSONL on
+stderr while preserving the single-result stdout contract. Inner traces are
+retrieved before owned Docker cleanup, and failed runs retain an exclusive,
+no-clobber sidecar. Central schema and transport enforcement cap records at
+4 KiB, 20,000 records, and 8 MiB total, emit truncation, and keep logging
+failures non-interfering. Ninety-one focused tests plus compilation and
+whitespace checks pass. This supports investigation of G4.1/G4.2/G4.3 but is
+not GPU measurement evidence; no profile exists and all remain **partial**.
+
+An exact rebuilt run with adapter identity
+`a820adef4ccb674a95771733524c5f3a2f341c75a59b9a0509786195395513d0`
+completed SmolLM through ceiling 32, then failed closed after CoEdIT readiness
+and before its first wave with `maximum_witness_failed`. Owned Docker cleanup
+was proved and no profile database was retained. Follow-up instrumentation now
+preserves the exact closed CoEdIT witness category without high-volume request
+success records exhausting the trace; 195 focused tests pass. A fresh GPU run
+is still required to identify and correct the predicate, so G4.1/G4.2/G4.3 stay
+**partial**.

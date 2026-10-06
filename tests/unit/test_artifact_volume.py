@@ -1,5 +1,8 @@
 from pathlib import Path
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -280,6 +283,48 @@ class ArtifactVolumeTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     provision({"SmolLM": model}, output)
             self.assertEqual((output / "current").readlink(), current)
+
+    def test_operator_cli_provisions_all_models_deterministically_and_fails_closed(self):
+        repository = Path(__file__).resolve().parents[2]
+        tool = repository / "tools" / "provision_artifacts.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sources = {model: source(root / "inputs", model) for model in SPECS}
+            output = root / "volume"
+            command = [sys.executable, str(tool), "--output", str(output)]
+            for model in ("SmolLM", "CoEdIT", "GECToR"):
+                command.extend(("--model", f"{model}={sources[model]}"))
+            environment = {**os.environ, "PYTHONPATH": str(repository)}
+
+            first = subprocess.run(command, cwd=root, env=environment, check=False,
+                                   capture_output=True, text=True)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            digest_line = first.stdout.splitlines()[0]
+            self.assertRegex(digest_line, r"^digest=[0-9a-f]{64} models=3 output=.*/volume/current$")
+            self.assertEqual(first.stdout.splitlines()[1:], [
+                "model=CoEdIT files=7 root=models/CoEdIT",
+                "model=GECToR files=6 root=models/GECToR",
+                "model=SmolLM files=2 root=models/SmolLM",
+            ])
+            selected = (output / "current").readlink()
+            self.assertEqual(set((output / selected / "models").iterdir()),
+                             {output / selected / "models" / model for model in SPECS})
+            for model, names in SPECS.items():
+                self.assertEqual({p.name for p in (output / selected / "models" / model).iterdir()},
+                                 set(names))
+
+            second = subprocess.run(command, cwd=root, env=environment, check=False,
+                                    capture_output=True, text=True)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(second.stdout, first.stdout)
+            self.assertEqual((output / "current").readlink(), selected)
+
+            (sources["GECToR"] / "verb-form-vocab.txt").unlink()
+            failed = subprocess.run(command, cwd=root, env=environment, check=False,
+                                   capture_output=True, text=True)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("verb-form-vocab.txt", failed.stderr)
+            self.assertEqual((output / "current").readlink(), selected)
 
 
 if __name__ == "__main__":

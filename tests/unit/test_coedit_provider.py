@@ -84,6 +84,45 @@ class CoEdITProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(provider._ready)
         self.assertTrue(await provider.verify_cleanup())
 
+    async def test_measurement_batch_override_configures_worker_and_batcher_together(self):
+        base = self.config("/tmp")
+        config = PythonProviderConfig(
+            Path("/tmp"), base.manifest_sha256, base.model_sha256, base.gpu_uuid,
+            base.runtime_identity, base.adapter_identity,
+            bucket_identity=base.bucket_identity, measurement_max_native_batch_size=2,
+            gpu_proof=base.gpu_proof)
+        provider = CoEdITProvider(config)
+        worker = AsyncMock()
+        worker.frame_limit = config.rpc_frame_limit
+        with patch("services.llm.providers.coedit.PythonWorker", return_value=worker) as worker_type, \
+                patch.object(provider, "_artifact", return_value=Path("/offline")):
+            await provider.load(self.profile(config))
+        self.assertEqual(worker_type.call_args.args[1]["max_native_batch_size"], 2)
+        self.assertEqual(provider._batcher.maximum, 2)
+        self.assertEqual(provider.worker, worker)
+        await provider.unload()
+
+    async def test_production_load_keeps_worker_and_batcher_at_one(self):
+        config = self.config("/tmp")
+        provider = CoEdITProvider(config)
+        worker = AsyncMock()
+        worker.frame_limit = config.rpc_frame_limit
+        with patch("services.llm.providers.coedit.PythonWorker", return_value=worker) as worker_type, \
+                patch.object(provider, "_artifact", return_value=Path("/offline")):
+            await provider.load(self.profile(config))
+            self.assertEqual(worker_type.call_args.args[1]["max_native_batch_size"], 1)
+        self.assertEqual(provider._batcher.maximum, 1)
+        await provider.unload()
+
+    async def test_measurement_batch_override_remains_bounded(self):
+        base = self.config("/tmp")
+        with self.assertRaisesRegex(ValueError, "measurement batch ceiling"):
+            PythonProviderConfig(
+                Path("/tmp"), base.manifest_sha256, base.model_sha256, base.gpu_uuid,
+                base.runtime_identity, base.adapter_identity,
+                bucket_identity=base.bucket_identity,
+                measurement_max_native_batch_size=33, gpu_proof=base.gpu_proof)
+
     async def test_opt_in_batch_profile_is_bound_to_exact_batch_bucket(self):
         config = self.config("/tmp")
         config = PythonProviderConfig(Path("/tmp"), config.manifest_sha256, config.model_sha256,

@@ -14,10 +14,20 @@ import time
 
 from .config import GPUProof
 from .gpu import ProcessIdentity
+from services.llm.resource_manager.protocol import Failure
 
 
 class WorkerRequestValidationError(ValueError):
     """A rejected immutable request, not evidence that the worker is unsafe."""
+
+
+class WorkerFailure(RuntimeError):
+    """A closed child-worker failure that must retire the worker."""
+
+    def __init__(self, code: str):
+        super().__init__("worker operation failed")
+        self.failure = Failure(code, "worker operation failed", False)
+        self.failure_code = code
 
 
 class PythonWorker:
@@ -180,8 +190,8 @@ class PythonWorker:
                 # recoverable; every other uncertain worker failure remains
                 # fatal below.
                 raise WorkerRequestValidationError("worker rejected request validation")
-            if response.get("ok") is False and set(response)=={"id","ok","error"} and response["error"] in {"worker_operation_failed","request_validation_failed","insufficient_max_input","benchmark_tokenization_failed","benchmark_input_over_bound","gpu_mig_api_unavailable","gpu_mig_api_failed","gpu_identity_mismatch"}:
-                self._failed=RuntimeError("worker operation failed: "+response["error"])
+            if response.get("ok") is False and set(response)=={"id","ok","error"} and response["error"] in {"worker_operation_failed","request_validation_failed","insufficient_max_input","benchmark_tokenization_failed","benchmark_input_over_bound","gpu_mig_api_unavailable","gpu_mig_api_failed","gpu_identity_mismatch","oom","allocator_observation_failed","decoder_metadata_workload_failed","output_contract_failed","rpc_request_bound_failed","rpc_response_bound_failed"}:
+                self._failed=WorkerFailure(response["error"])
                 await self.close()
                 raise self._failed
             if set(response) != {"id", "ok", "value"} or response.get("ok") is not True:

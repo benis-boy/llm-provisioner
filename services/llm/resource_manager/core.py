@@ -18,6 +18,11 @@ from services.llm.resource_manager.protocol import (
     ResourceManagerClient, SessionInfo, Submission,
 )
 from services.llm.resource_manager.state import ResourceManagerState
+try:
+    from tools.compatibility.debug_trace import record as trace
+except ImportError:
+    def trace(*args, **kwargs):
+        return None
 
 
 class ResourceManagerError(RuntimeError):
@@ -219,6 +224,7 @@ class ResourceManager(ResourceManagerClient):
     async def start_session(self, scheduler_id: str, model_id: ModelId,
                             profile: CapacityProfile, provider: Provider, *,
                             idempotency_key: str) -> SessionInfo:
+        trace("resource_manager", "load", "enter", model=ModelId(model_id).value)
         self._key(idempotency_key, "idempotency_key")
         args = (scheduler_id, ModelId(model_id), profile, provider)
         # A known start replay must be rejected promptly once its session has
@@ -264,9 +270,12 @@ class ResourceManager(ResourceManagerClient):
                 self._available = False  # remains closed through validate/load/ready
                 self._phase = "loading"
             deadline = time.monotonic() + self.load_timeout
+            lifecycle_phase = "validate"
             try:
                 await self._bounded(provider.validate(profile), deadline)
+                lifecycle_phase = "load"
                 await self._bounded(provider.load(profile), deadline)
+                lifecycle_phase = "ready"
                 await self._bounded(provider.ready(), deadline)
             except BaseException as exc:
                 async with self._lock:
@@ -282,11 +291,40 @@ class ResourceManager(ResourceManagerClient):
                 # before another session can be admitted.
                 # A synchronous shutdown fence owns cleanup of a load which
                 # was still in flight.  Do not race that shared cleanup task.
+                cleanup_error = None
                 if not (self._permanently_closed and self._session != info):
-                    await self._cleanup(provider, timeout=self.cleanup_timeout)
+                    try:
+                        await self._cleanup(provider, timeout=self.cleanup_timeout)
+                    except BaseException as cleanup_exc:
+                        cleanup_error = cleanup_exc
                 if isinstance(exc, ResourceManagerError):
-                    raise
-                raise self._error("model_load_failed", str(exc)) from exc
+                    if exc.failure.code == "lifecycle_timeout":
+                        exc.lifecycle_phase = lifecycle_phase
+                        exc.lifecycle_subreason = "timeout"
+                else:
+                    phase = getattr(exc, "lifecycle_phase", None)
+                    subreason = getattr(exc, "lifecycle_subreason", None)
+                    error = self._error("model_load_failed", "provider model load failed")
+                    error.lifecycle_phase = phase
+                    error.lifecycle_subreason = subreason
+                    exc = error
+                if cleanup_error is not None:
+                    # Cleanup is authoritative for admission, but the startup
+                    # classification must remain inspectable rather than being
+                    # replaced by a generic cleanup exception.
+                    setattr(cleanup_error, "startup_lifecycle_phase",
+                            getattr(exc, "lifecycle_phase", None))
+                    setattr(cleanup_error, "startup_lifecycle_subreason",
+                            getattr(exc, "lifecycle_subreason", None))
+                    cleanup_phase = getattr(cleanup_error, "lifecycle_phase", "cleanup")
+                    cleanup_subreason = getattr(cleanup_error, "lifecycle_subreason", "cleanup_verification")
+                    setattr(cleanup_error, "lifecycle_phase", cleanup_phase)
+                    setattr(cleanup_error, "lifecycle_subreason", cleanup_subreason)
+                    raise BaseExceptionGroup("startup and cleanup lifecycle failed",
+                                             [exc, cleanup_error])
+                if isinstance(exc, ResourceManagerError):
+                    raise exc
+                raise exc
             async with self._lock:
                 if self._session != info:
                     raise self._error("scheduler_superseded", "session was replaced")
@@ -310,9 +348,11 @@ class ResourceManager(ResourceManagerClient):
                 self._event_number[info.session_token] = 0
                 self._completion_number[info.session_token] = 0
                 self._start_records[idempotency_key] = (args, info)
+                trace("resource_manager", "ready", "success", model=info.model_id.value)
                 return info
 
     async def _cleanup(self, provider: Provider, *, timeout: float | None = None) -> None:
+        trace("resource_manager", "cleanup", "enter")
         timeout = self.cleanup_timeout if timeout is None else timeout
         deadline = time.monotonic() + timeout
         try:
@@ -343,10 +383,14 @@ class ResourceManager(ResourceManagerClient):
                 self._available = not self._permanently_closed
                 if self._session is None and not self._permanently_closed:
                     self._phase = "startup"
-        except ResourceManagerError:
+        except ResourceManagerError as exc:
+            if exc.failure.code in {"cleanup_timeout", "cleanup_failed"}:
+                exc.lifecycle_phase = "cleanup"
+                exc.lifecycle_subreason = "timeout" if exc.failure.code == "cleanup_timeout" else "cleanup_verification"
             async with self._lock:
                 self._available = False
                 self._phase = "cleanup_failed"
+            trace("resource_manager", "cleanup", "failure", failure_code=exc.failure.code)
             raise
         except asyncio.CancelledError:
             async with self._lock:
@@ -357,17 +401,22 @@ class ResourceManager(ResourceManagerClient):
             async with self._lock:
                 self._available = False
                 self._phase = "cleanup_failed"
-            raise self._error("cleanup_failed", str(exc)) from exc
+            error = self._error("cleanup_failed", "provider cleanup failed")
+            error.lifecycle_phase = "cleanup"
+            error.lifecycle_subreason = "timeout" if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) else "cleanup_verification"
+            trace("resource_manager", "cleanup", "failure", failure_code="cleanup_failed")
+            raise error from exc
 
     def _emit_locked(self, session: SessionInfo, kind: EventKind, *, request_id=None,
-                     attempt=None, result=None, failure=None, timing=None, complete=False) -> None:
+                     attempt=None, result=None, failure=None, timing=None, complete=False,
+                     observation=None) -> None:
         token = session.session_token
         self._event_number[token] = self._event_number.get(token, 0) + 1
         if kind is EventKind.RESPONSE_FINISHED:
             self._completion_number[token] = self._completion_number.get(token, 0) + 1
         event = ProgressEvent(self._event_number[token], self._completion_number.get(token, 0), kind,
                               request_id, attempt, token, session.generation, result, failure,
-                              timing, complete)
+                               timing, complete, observation)
         self._events.setdefault(token, deque(maxlen=self.max_events)).append(event)
         for waiter in self._waiters.pop(token, []):
             if not waiter.done(): waiter.set_result(None)
@@ -448,14 +497,17 @@ class ResourceManager(ResourceManagerClient):
         except ResourceManagerError:
             async with self._lock:
                 release()
+            trace("resource_manager", "admission", "failure")
             raise
         except Exception as exc:
             async with self._lock:
                 release()
+            trace("resource_manager", "admission", "failure")
             raise self._error("invalid_input", str(exc)) from exc
         except BaseException:
             async with self._lock:
                 release()
+            trace("resource_manager", "admission", "failure")
             raise
         try:
             async with self._lock:
@@ -507,10 +559,49 @@ class ResourceManager(ResourceManagerClient):
 
     @staticmethod
     def _provider_failure(exc: BaseException) -> Failure:
-        if isinstance(exc, ResourceManagerError): return exc.failure
-        failure = getattr(exc, "failure", None)
-        if isinstance(failure, Failure): return failure
-        return Failure("provider_execution_failed", str(exc), True)
+        """Keep a producer's typed failure through async wrapper exceptions.
+
+        ``execute`` failures normally arrive directly, but task/gather cleanup
+        can retain the producer exception as a cause or an exception-group
+        member.  Looking only at the outer exception discarded the closed
+        provider category at that boundary.
+        """
+        pending = [exc]
+        seen: set[int] = set()
+        while pending and len(seen) < 16:
+            current = pending.pop(0)
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            if isinstance(current, ResourceManagerError):
+                return current.failure
+            failure = getattr(current, "failure", None)
+            if isinstance(failure, Failure):
+                return failure
+            if isinstance(current, BaseExceptionGroup):
+                pending.extend(item for item in current.exceptions
+                               if isinstance(item, BaseException))
+            cause = current.__cause__
+            context = current.__context__
+            if isinstance(cause, BaseException):
+                pending.append(cause)
+            if isinstance(context, BaseException):
+                pending.append(context)
+        # Exception text can contain a provider body, prompt, or local path.
+        # The event remains useful through its stable category without making
+        # that text a transport channel.
+        return Failure("provider_execution_failed", "provider execution failed", True)
+
+    @staticmethod
+    def _valid_provider_response(response: object) -> bool:
+        """Validate all response fields before publishing provider evidence."""
+        if not isinstance(response, ProviderResponse) or not isinstance(response.result, bytes) or not response.result:
+            return False
+        if type(response.gpu_timing_complete) is not bool:
+            return False
+        if response.gpu_timing_complete:
+            return (type(response.time_on_gpu_ms) is int and response.time_on_gpu_ms >= 0)
+        return response.time_on_gpu_ms is None
 
     async def _run(self, work: _Work, provider: Provider) -> None:
         response: ProviderResponse | None = None
@@ -518,11 +609,8 @@ class ResourceManager(ResourceManagerClient):
         cancelled = False
         try:
             response = await provider.execute(work.request_id, work.payload)
-            if not isinstance(response, ProviderResponse) or not isinstance(response.result, bytes) or not response.result:
+            if not self._valid_provider_response(response):
                 failure = Failure("malformed_provider_response", "provider returned invalid result", False)
-            elif response.gpu_timing_complete and (isinstance(response.time_on_gpu_ms, bool) or
-                                                    not isinstance(response.time_on_gpu_ms, int) or response.time_on_gpu_ms < 0):
-                failure = Failure("malformed_provider_response", "invalid complete GPU timing", False)
         except asyncio.CancelledError:
             cancelled = True
         except BaseException as exc:
@@ -553,7 +641,8 @@ class ResourceManager(ResourceManagerClient):
                               and response.time_on_gpu_ms >= 0 else None)
                     self._emit_locked(work.session, EventKind.RESPONSE_FINISHED, request_id=work.request_id,
                                       attempt=work.attempt, result=response.result if current else None,
-                                      timing=timing, complete=timing is not None)
+                                      timing=timing, complete=timing is not None,
+                                      observation=response.observation if response else None)
                 if self._session == work.session and self._profile and self._available:
                     while self._buffer and len(self._active) < self._profile.optimal_parallelism:
                         nxt = self._buffer.popleft()
@@ -562,6 +651,8 @@ class ResourceManager(ResourceManagerClient):
                         self._emit_locked(nxt.session, EventKind.ADMISSION, request_id=nxt.request_id, attempt=nxt.attempt)
                         nxt.slot_started = time.monotonic()
                         nxt.task = asyncio.create_task(self._run(nxt, provider))
+                if failure is not None or cancelled:
+                    trace("resource_manager", "execute", "failure")
 
     async def cancel_request(self, session_token: str, request_id: str, *, idempotency_key: str) -> bool:
         self._key(idempotency_key, "idempotency_key")

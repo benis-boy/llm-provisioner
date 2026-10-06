@@ -124,6 +124,26 @@ as errors. The separate offline installed-adapter candidate now also exercises
 the real `OwnedOllama` with the shared parent proof; it still uses explicitly
 unmeasured profiles and does not start this composed HTTP service.
 
+## ResourceManager provisioning-mode precursor
+
+`services.llm.provisioning.rm_runner.provision_request` is the bounded offline
+benchmark entry point. It accepts the actual `ResourceManager` owned by the
+runtime and a server-owned `ModelBinding`, resolves the real adapter once, and
+then uses only `start_session`, `submit`, `watch_progress`, `cancel_request`,
+and `stop_session`. Thus admission, residency generation, provider lifecycle,
+fencing, cleanup, and GPU timing remain ResourceManager authority rather than a
+profiling-only substitute. The returned `ProvisioningEvidence` records the
+session/submission identities, progress events, result, and optional completed
+GPU timing; `measured_capacity_claim` is always false.
+
+The entry point is bounded, offline, performs no download, rejects mismatched
+model/session/request/generation identity, and shields cancellation cleanup.
+Failure, backpressure, malformed output, and caller cancellation all attempt
+request cancellation followed by session stop. A cleanup failure remains an
+operator-visible failure; it is never reported as successful evidence. This is
+an implementation precursor only: without GPU production evidence it does not
+prove capacity and must not check the production-evidence checkbox.
+
 This is still composition and local lifecycle evidence, not a production image
 or qualifying deployment proof.  The artifact check is point-in-time and
 requires the selected volume to remain immutable/read-only while providers use

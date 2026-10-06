@@ -52,4 +52,4 @@ For product or test failures, give the evidence-based failure mode. For environm
 What the executed checks prove and what remains unverified.
 
 ## Design Escalation
-For an environment block, tell the Design agent to consider aborting and notifying the user to repair the environment. Write `None` otherwise.
+For an environment block, tell the Design agent to consider aborting and ordering to repair the environment. Write `None` otherwise.

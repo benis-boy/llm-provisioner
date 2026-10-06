@@ -211,4 +211,12 @@ Docker tar archive; no full JSON was dumped or copied. The tester removed the
 named container and verified absence; foreign workloads were untouched.
 **162 task-related tests**, focused compilation, whitespace validation and
 offline build passed. Independent review found no remaining code defects.
-G4.1/G4.2/G4.3 remain partial; further capacity proof is separate follow-up work.
+For the provisioning proof (as distinct from this candidate-only tool),
+CoEdIT's whole-device samples are aggregate native-batch observations. They
+are retained for replay, but are not treated as bytes per slot. The owned
+discovery protocol therefore tests every p=2..fixed-provider-capability point,
+or accepts only a typed OOM/reserve-breach witness at N+1. Reaching a lower
+operator ceiling without either boundary fails closed as
+`configured_ceiling_unproved`; unknown and contract failures remain integrity
+failures. Persistence requires the exact retained discovery sequence and
+replayed memory summary, rejecting missing or tampered evidence.

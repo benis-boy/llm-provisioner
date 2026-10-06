@@ -10,6 +10,10 @@ from .gpu import (GPUMemoryObservation, ProcessIdentity, ResidencyEvidence,
                   _ResidencyPending, settle_residency)
 from .python_process import PythonWorker
 from .gector_config import GECToRProviderConfig
+try:
+    from tools.compatibility.debug_trace import lifecycle
+except ImportError:
+    def lifecycle(*args, **kwargs): return lambda function: function
 
 
 class GECToRProvider:
@@ -38,6 +42,7 @@ class GECToRProvider:
             raise ValueError("GECToR artifact identity or vocabulary mismatch")
         return root / "models" / "GECToR"
 
+    @lifecycle("provider.gector")
     async def validate(self, profile: CapacityProfile):
         if (profile.model_id is not ModelId.GECTOR or profile.bucket_identity != self.config.bucket_identity
                 or profile.context_size is not None or profile.optimal_parallelism != 1
@@ -47,6 +52,7 @@ class GECToRProvider:
             raise ValueError("unsupported GECToR profile")
         self.profile = profile
 
+    @lifecycle("provider.gector")
     async def load(self, profile):
         self._ready = False
         self._model_specific_ready = False
@@ -72,6 +78,7 @@ class GECToRProvider:
             self._cleanup = True
             raise
 
+    @lifecycle("provider.gector")
     async def ready(self):
         self._ready = False
         self._model_specific_ready = False
@@ -172,6 +179,7 @@ class GECToRProvider:
         try: return json.loads(payload.decode("utf-8"), object_pairs_hook=pairs, parse_constant=lambda _: (_ for _ in ()).throw(ValueError("non-finite JSON")))
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc: raise ValueError("invalid GECToR request") from exc
 
+    @lifecycle("provider.gector", failures_only=True)
     async def validate_input(self, payload, *, context_size, bucket_identity):
         if self.profile is None or context_size is not None or bucket_identity != self.config.bucket_identity or not self.profile.accepts_request(context_size, bucket_identity) or self.worker is None:
             raise ValueError("request does not match GECToR bucket")
@@ -191,20 +199,29 @@ class GECToRProvider:
         if not result["accepted"]:
             raise ValueError("GECToR request exceeds no-truncation bucket")
 
+    @lifecycle("provider.gector", failures_only=True)
     async def execute(self, request_id, payload):
         if not self._ready or self.worker is None: raise RuntimeError("provider is not ready")
         await self.validate_input(payload, context_size=None, bucket_identity=self.config.bucket_identity)
         body = self._decode(payload)
         result = await self.worker.call("execute", **{key: body[key] for key in ("texts", "keep_confidence", "min_error_prob", "n_iteration", "batch_size")})
-        if not isinstance(result, list) or len(result) != 1 or not isinstance(result[0], str) or not result[0].strip(): raise RuntimeError("invalid aligned GECToR response")
-        encoded = json.dumps({"texts": result}, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
+        if (not isinstance(result, dict) or set(result) != {"outputs", "observation"}
+                or not isinstance(result["outputs"], list) or len(result["outputs"]) != 1
+                or not isinstance(result["outputs"][0], str) or not result["outputs"][0].strip()):
+            raise RuntimeError("invalid aligned GECToR response")
+        observation = result["observation"]
+        if not isinstance(observation, dict): raise RuntimeError("invalid GECToR observation")
+        observation = {**observation, "request_ids": (request_id,)}
+        encoded = json.dumps({"texts": result["outputs"]}, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
         if len(encoded) > self.config.rpc_frame_limit: raise RuntimeError("GECToR response exceeds bound")
-        return ProviderResponse(encoded)
+        return ProviderResponse(encoded, observation=observation)
 
     async def cancel(self, request_id): return None
+    @lifecycle("provider.gector")
     async def unload(self):
         self._ready = False
         if self.worker is not None: await self.worker.close()
         self.worker = self.profile = None; self._preload_memory = None
         self._model_specific_ready = False; self._cleanup = True
+    @lifecycle("provider.gector")
     async def verify_cleanup(self): return self._cleanup and self.worker is None

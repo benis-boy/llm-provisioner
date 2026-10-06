@@ -1,18 +1,31 @@
 # Offline-only image for real services.llm.providers adapter checks.
-ARG BASE_IMAGE=llm-compatibility-spike:candidate
+ARG BASE_IMAGE
+ARG COMPATIBILITY_IDENTITY
+ARG COMPATIBILITY_BASE_ID
+ARG COMPATIBILITY_SOURCE_SHA256
+ARG COMPATIBILITY_INPUTS_SHA256
 FROM ${BASE_IMAGE}
+ARG COMPATIBILITY_IDENTITY
+ARG COMPATIBILITY_BASE_ID
+ARG COMPATIBILITY_SOURCE_SHA256
+ARG COMPATIBILITY_INPUTS_SHA256
+LABEL org.llm-provider.compatibility.schema="compatibility-image-identity/v1" \
+      org.llm-provider.compatibility.role="adapter" \
+      org.llm-provider.compatibility.identity="${COMPATIBILITY_IDENTITY}" \
+      org.llm-provider.compatibility.base="${COMPATIBILITY_BASE_ID}" \
+      org.llm-provider.compatibility.source-sha256="${COMPATIBILITY_SOURCE_SHA256}" \
+      org.llm-provider.compatibility.inputs-sha256="${COMPATIBILITY_INPUTS_SHA256}"
 ENV PYTHONUNBUFFERED=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
     HF_DATASETS_OFFLINE=1 NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost
 WORKDIR /opt/llm
 COPY services/ /opt/llm/services/
-COPY tools/compatibility/adapter_check.py /opt/llm/adapter_check.py
-COPY tools/compatibility/coedit_adapter_check.py /opt/llm/coedit_adapter_check.py
-COPY tools/compatibility/coedit_capacity_check.py /opt/llm/coedit_capacity_check.py
-COPY tools/compatibility/gector_adapter_check.py /opt/llm/gector_adapter_check.py
-COPY tools/compatibility/three_model_adapter_check.py /opt/llm/three_model_adapter_check.py
-COPY tools/compatibility/scheduler_adapter_check.py /opt/llm/scheduler_adapter_check.py
+COPY tools/compatibility/ /opt/llm/tools/compatibility/
+# Keep the historical executable path while retaining the package layout used
+# by the measurement entry point. This is a link, not a second implementation.
+RUN ln -s tools/compatibility/measure_profiles.py /opt/llm/measure_profiles.py \
+    && ln -s tools/compatibility/prepare_measurement.py /opt/llm/prepare_measurement.py
 COPY .compatibility/adapter-deps/wheelhouse/ /opt/llm/adapter-wheelhouse/
 COPY .compatibility/adapter-deps/requirements.lock /opt/llm/adapter-requirements.lock
 RUN /opt/venv/bin/python -m pip install --no-index --no-cache-dir --require-hashes \
     --find-links=/opt/llm/adapter-wheelhouse -r /opt/llm/adapter-requirements.lock
-ENTRYPOINT ["/opt/venv/bin/python", "/opt/llm/adapter_check.py"]
+ENTRYPOINT ["/opt/venv/bin/python"]

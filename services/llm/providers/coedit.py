@@ -10,6 +10,10 @@ from services.llm.queue.contracts import ModelId
 from services.llm.resource_manager.protocol import ProviderResponse
 from .python_process import PythonWorker
 from .coedit_batch import CoEdITBatcher
+try:
+    from tools.compatibility.debug_trace import lifecycle
+except ImportError:
+    def lifecycle(*args, **kwargs): return lambda function: function
 class CoEdITProvider:
     def __init__(self, config):
         self.config = config
@@ -39,21 +43,25 @@ class CoEdITProvider:
         if next(x for x in files if x["path"] == "model.safetensors")["sha256"] != self.config.model_sha256:
             raise ValueError("CoEdIT model identity mismatch")
         return root / "models" / "CoEdIT"
+    @lifecycle("provider.coedit")
     async def validate(self,profile: CapacityProfile):
         if (profile.model_id is not ModelId.COEDIT or profile.bucket_identity != self.config.bucket_identity
-                or profile.context_size is not None or not 1 <= profile.optimal_parallelism <= self.config.max_native_batch_size
+                or profile.context_size is not None or not 1 <= profile.optimal_parallelism <= (self.config.measurement_max_native_batch_size or self.config.max_native_batch_size)
                 or profile.buffer_capacity != profile.optimal_parallelism or not profile.matches(ModelId.COEDIT,
                 self.config.gpu_uuid, self.config.manifest_sha256, self.config.model_sha256,
                 self.config.runtime_identity, self.config.adapter_identity)):
             raise ValueError("unsupported CoEdIT profile")
         self.profile=profile
+    @lifecycle("provider.coedit")
     async def load(self,profile):
         self._ready = False
         self._model_specific_ready = False
         await self.validate(profile); root=await asyncio.to_thread(self._artifact); self._cleanup=False
         self._preload_memory = await self._memory() if self.config.gpu_proof.memory is not None else None
         if self.worker is not None: raise RuntimeError("previous CoEdIT worker has not been cleaned up")
-        self.worker=PythonWorker(root,{"dtype":self.config.dtype,"gpu_uuid":self.config.gpu_uuid,"max_input_tokens":self.config.max_input_tokens,"max_output_tokens":self.config.max_output_tokens,"generation_parameters":dict(self.config.generation_parameters),"max_native_batch_size":self.config.max_native_batch_size,"rpc_frame_limit":self.config.rpc_frame_limit,"cuda_timing":True},timeout=self.config.request_timeout_seconds,frame_limit=self.config.rpc_frame_limit,gpu_proof=self.config.gpu_proof)
+        native_batch_size = (self.config.measurement_max_native_batch_size
+                             or self.config.max_native_batch_size)
+        self.worker=PythonWorker(root,{"dtype":self.config.dtype,"gpu_uuid":self.config.gpu_uuid,"max_input_tokens":self.config.max_input_tokens,"max_output_tokens":self.config.max_output_tokens,"generation_parameters":dict(self.config.generation_parameters),"max_native_batch_size":native_batch_size,"rpc_frame_limit":self.config.rpc_frame_limit,"cuda_timing":True},timeout=self.config.request_timeout_seconds,frame_limit=self.config.rpc_frame_limit,gpu_proof=self.config.gpu_proof)
         try:
             await self.worker.start()
             await self.worker.call("load")
@@ -65,8 +73,9 @@ class CoEdITProvider:
             self.worker = None
             self._cleanup = True
             raise
-        self._batcher = CoEdITBatcher(self.worker, self.config.max_native_batch_size,
+        self._batcher = CoEdITBatcher(self.worker, native_batch_size,
             self.config.native_batch_delay_seconds, self.config.max_output_tokens)
+    @lifecycle("provider.coedit")
     async def ready(self):
         self._ready = False
         self._model_specific_ready = False
@@ -199,11 +208,13 @@ class CoEdITProvider:
             raise ValueError("invalid CoEdIT request")
         return body
 
+    @lifecycle("provider.coedit", failures_only=True)
     async def validate_input(self,payload,*,context_size,bucket_identity):
         if (self.profile is None or context_size is not None or bucket_identity!=self.config.bucket_identity
                 or not self.profile.accepts_request(context_size, bucket_identity) or self.worker is None): raise ValueError("request does not match CoEdIT bucket")
         if not isinstance(payload,bytes) or len(payload)>self.config.rpc_frame_limit: raise ValueError("CoEdIT request exceeds bound")
         self._decode_input(payload)
+    @lifecycle("provider.coedit", failures_only=True)
     async def execute(self,request_id,payload):
         if not self._ready or self.worker is None: raise RuntimeError("provider is not ready")
         # Do not trust a prior admission result (or a caller-held mutable
@@ -219,7 +230,16 @@ class CoEdITProvider:
         if not isinstance(result,str) or not result: raise RuntimeError("invalid aligned CoEdIT response")
         encoded=json.dumps({"texts":[result]},separators=(",",":"),ensure_ascii=False,allow_nan=False).encode()
         if len(encoded)>self.config.rpc_frame_limit: raise RuntimeError("CoEdIT response exceeds bound")
-        return ProviderResponse(encoded)
+        return ProviderResponse(encoded, observation={
+            "batch_size": observation.batch_size,
+            "execution_started": observation.execution_started,
+            "execution_ended": observation.execution_ended,
+            "cuda_synchronized": observation.cuda_synchronized,
+            "allocator": observation.allocator.__dict__,
+            "decoder_steps": list(observation.decoder_steps),
+            "max_output_tokens": observation.max_output_tokens,
+            "request_ids": observation.request_ids,
+        })
     async def cancel(self,request_id):
         if self._batcher is not None: self._batcher.cancel(request_id)
 
@@ -227,6 +247,7 @@ class CoEdITProvider:
         return self._batcher.drain_observations() if self._batcher is not None else ()
     def batch_observation_drops(self):
         return self._batcher.dropped_observations if self._batcher is not None else 0
+    @lifecycle("provider.coedit")
     async def unload(self):
         self._ready = False
         if self._cleanup_task is None or self._cleanup_task.done():
@@ -250,4 +271,5 @@ class CoEdITProvider:
             self._model_specific_ready=False
             self._preload_memory=None
             self._cleanup=True
+    @lifecycle("provider.coedit")
     async def verify_cleanup(self): return self._cleanup and self.worker is None

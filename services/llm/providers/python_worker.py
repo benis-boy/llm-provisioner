@@ -4,9 +4,28 @@ import hashlib, json, math, os, struct, sys, uuid
 from pathlib import Path
 MAX_FRAME = 256 * 1024
 MAX_RPC_ID = 2 ** 63 - 1
+EXECUTE_BATCH_FAILURE_CODES = frozenset({"oom", "allocator_observation_failed", "decoder_metadata_workload_failed", "output_contract_failed", "rpc_request_bound_failed", "rpc_response_bound_failed", "request_validation_failed"})
 class InsufficientMaxInput(ValueError): pass
 class BenchmarkInputError(ValueError): pass
 class InputValidationError(ValueError): pass
+class WorkerContractFailure(RuntimeError):
+    """An internally-raised, closed execute-batch contract category."""
+    def __init__(self, code):
+        if code not in EXECUTE_BATCH_FAILURE_CODES - {"oom", "request_validation_failed"}:
+            raise ValueError("unknown worker contract failure")
+        super().__init__(code)
+        self.code = code
+def _is_cuda_oom(exc, torch):
+    """Recognize only the optional runtime's typed CUDA OOM exception."""
+    candidates = (getattr(torch, "OutOfMemoryError", None),
+                  getattr(getattr(torch, "cuda", None), "OutOfMemoryError", None))
+    return any(isinstance(candidate, type) and isinstance(exc, candidate)
+               for candidate in candidates)
+def _execute_batch_failure_code(exc, torch):
+    if isinstance(exc, InputValidationError): return "request_validation_failed"
+    if isinstance(exc, WorkerContractFailure): return exc.code
+    if _is_cuda_oom(exc, torch): return "oom"
+    return "worker_operation_failed"
 def _pairs(items):
     result = {}
     for key, value in items:
@@ -28,7 +47,7 @@ def _read(stream, gector=False):
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc: raise RuntimeError("malformed RPC request") from exc
     if not isinstance(value,dict) or type(value.get("id")) is not int or not 1 <= value["id"] <= MAX_RPC_ID or not isinstance(value.get("op"),str): raise RuntimeError("malformed RPC request")
     allowed={"load":{"id","op"},"cuda_ready":{"id","op"},"cuda_residency":{"id","op"},"gpu_identity":{"id","op"},"shutdown":{"id","op"},"validate":{"id","op","instruction","texts"},"execute":{"id","op","instruction","texts"},"execute_batch":{"id","op","items"},"benchmark_input":{"id","op","instruction","text","generate"}}
-    if gector: allowed.update({"validate":{"id","op","texts","keep_confidence","min_error_prob","n_iteration","batch_size"},"execute":{"id","op","texts","keep_confidence","min_error_prob","n_iteration","batch_size"}}); allowed.pop("execute_batch", None); allowed.pop("benchmark_input", None)
+    if gector: allowed.update({"validate":{"id","op","texts","keep_confidence","min_error_prob","n_iteration","batch_size"},"execute":{"id","op","texts","keep_confidence","min_error_prob","n_iteration","batch_size"},"benchmark_input":{"id","op","texts","keep_confidence","min_error_prob","n_iteration","batch_size"}}); allowed.pop("execute_batch", None)
     if value["op"] not in allowed or set(value)!=allowed[value["op"]]: raise RuntimeError("malformed RPC request")
     return value
 def _write(value):
@@ -151,7 +170,7 @@ class Runtime:
         import time, torch
         limit = int(self.config.get("max_native_batch_size", 1))
         if not isinstance(items, list) or not 1 <= len(items) <= limit:
-            raise ValueError("invalid native batch size")
+            raise InputValidationError("invalid native batch size")
         frames = []
         for item in items:
             if (not isinstance(item, dict) or set(item) != {"instruction", "texts"}
@@ -162,7 +181,7 @@ class Runtime:
             frames.append(self.frame(item["instruction"], item["texts"][0]))
         envelope = {"id": MAX_RPC_ID, "op": "execute_batch", "items": items}
         if len(json.dumps(envelope, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode()) + 4 > int(self.config.get("rpc_frame_limit", MAX_FRAME)):
-            raise RuntimeError("native batch request exceeds bound")
+            raise WorkerContractFailure("rpc_request_bound_failed")
         cuda = getattr(torch, "cuda", None)
         if self.config.get("cuda_timing", True) is not True or not callable(getattr(cuda, "synchronize", None)):
             raise RuntimeError("CUDA synchronization is required for native batch timing")
@@ -175,10 +194,10 @@ class Runtime:
         peak_allocated = getattr(torch.cuda, "max_memory_allocated", None)
         peak_reserved = getattr(torch.cuda, "max_memory_reserved", None)
         if not all(callable(value) for value in (allocator[0], allocator[1], reset_peak, peak_allocated, peak_reserved)):
-            raise RuntimeError("Torch CUDA allocator measurement is unavailable")
+            raise WorkerContractFailure("allocator_observation_failed")
         baseline_allocated, baseline_reserved = allocator[0](0), allocator[1](0)
         if any(type(value) is not int for value in (baseline_allocated, baseline_reserved)):
-            raise RuntimeError("invalid Torch CUDA allocator baseline")
+            raise WorkerContractFailure("allocator_observation_failed")
         reset_peak(0)
         started = time.monotonic_ns()
         with torch.inference_mode():
@@ -197,23 +216,24 @@ class Runtime:
                 and baseline_allocated <= baseline_reserved
                 and peak_allocated_value <= peak_reserved_value
                 and final_allocated <= final_reserved):
-            raise RuntimeError("inconsistent Torch CUDA allocator measurement")
+            raise WorkerContractFailure("allocator_observation_failed")
         encoded_values = encoded if hasattr(encoded, "get") else None
         if encoded_values is None or not self._batch_dimension_matches(encoded_values.get("input_ids"), len(items)) or not self._batch_dimension_matches(encoded_values.get("attention_mask"), len(items)):
-            raise RuntimeError("invalid encoded native batch cardinality")
+            raise WorkerContractFailure("output_contract_failed")
         if output.shape[0] != len(items) or output.shape[1] > self.config["max_output_tokens"] + 1:
-            raise RuntimeError("generation exceeded decoder-start output bound")
-        decoder_steps = self._decoder_workload(output, len(items))
+            raise WorkerContractFailure("output_contract_failed")
+        try: decoder_steps = self._decoder_workload(output, len(items))
+        except RuntimeError as exc: raise WorkerContractFailure("decoder_metadata_workload_failed") from exc
         result = self.tokenizer.batch_decode(output, skip_special_tokens=True)
         if len(result) != len(items) or any(not isinstance(x, str) or not x for x in result):
-            raise RuntimeError("invalid output")
+            raise WorkerContractFailure("output_contract_failed")
         response = {"outputs": result, "observation": {"batch_size": len(items), "execution_started": started, "execution_ended": ended, "cuda_synchronized": synchronized,
             "decoder_steps": decoder_steps, "max_output_tokens": self.config["max_output_tokens"],
             "allocator": {"baseline_allocated": baseline_allocated, "baseline_reserved": baseline_reserved,
                           "peak_allocated": peak_allocated_value, "peak_reserved": peak_reserved_value,
                           "final_allocated": final_allocated, "final_reserved": final_reserved}}}
         if len(json.dumps(response, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode()) + 4 > int(self.config.get("rpc_frame_limit", MAX_FRAME)):
-            raise RuntimeError("native batch response exceeds bound")
+            raise WorkerContractFailure("rpc_response_bound_failed")
         return response
 
     def _decoder_workload(self, output, expected_batch):
@@ -299,16 +319,18 @@ def main(runtime_class=Runtime, gector=False):
                 if not gector: value = value or True
             elif op == "execute": value=runtime.execute(**{k:request[k] for k in request if k not in {"id","op"}}) if gector else runtime.execute(request.get("instruction"),request.get("texts"))
             elif op == "execute_batch": value=runtime.execute_batch(request["items"])
-            elif op == "benchmark_input": value=runtime.benchmark_input(request["instruction"],request["text"],request["generate"])
+            elif op == "benchmark_input": value=(runtime.benchmark_input(**{k:request[k] for k in request if k not in {"id","op"}}) if gector else runtime.benchmark_input(request["instruction"],request["text"],request["generate"]))
             else: value=None
             if op=="shutdown": break
             _write({"id":request.get("id"),"ok":True,"value":value})
         except Exception as exc:
             code = "worker_operation_failed"
-            if isinstance(exc, InputValidationError): code = "request_validation_failed"
-            if isinstance(exc, InsufficientMaxInput): code = "insufficient_max_input"
-            if isinstance(exc, BenchmarkInputError): code = str(exc)
-            if isinstance(exc, RuntimeError) and str(exc) in {"gpu_mig_api_unavailable", "gpu_mig_api_failed", "gpu_identity_mismatch"}:
+            if op == "execute_batch":
+                code = _execute_batch_failure_code(exc, sys.modules.get("torch"))
+            elif isinstance(exc, InputValidationError): code = "request_validation_failed"
+            elif isinstance(exc, InsufficientMaxInput): code = "insufficient_max_input"
+            elif isinstance(exc, BenchmarkInputError): code = str(exc)
+            elif isinstance(exc, RuntimeError) and str(exc) in {"gpu_mig_api_unavailable", "gpu_mig_api_failed", "gpu_identity_mismatch"}:
                 code = str(exc)
             _write({"id":request.get("id"),"ok":False,"error":code})
     return 0
