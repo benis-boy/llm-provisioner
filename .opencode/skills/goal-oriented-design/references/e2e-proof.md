@@ -16,7 +16,125 @@ candidate offline tooling exist. Real production provider/server boundaries,
 measured profiles and production packaging remain incomplete.
 No qualifying production-boundary E2E proof exists and no leaf is done.
 
-## Latest Phase 5 actual-GPU attempt (2026-09-18)
+## Phase 5 provisioning continuation (2026-10-07)
+
+**Unit/local integration and candidate operator/GPU evidence**, supporting
+G0/G4.1/G4.2/G4.3 without promoting their `partial` statuses.
+
+The identity-tracked image
+`llm-compatibility-adapter:phase5-20261007-114456` with adapter image identity
+`86539ea6ef25ed8c3a826e2a1b091a62216f095c06ecc69e35112884a78b509b`
+and `.compatibility/measurement-bundle` passed their verifiers. The full
+network-disabled exact-GPU matrix completed measurements and per-model
+persistence for all three selectors, then failed at the final read-only store
+audit with `CorruptProfileStore`. No profile database, WAL/SHM or reservation
+lock remained; owned Docker cleanup was proved. The bounded trace was not
+truncated; reservation-to-cleanup-entry duration was 1,013.49 seconds.
+
+The exact-context/profile-identity lookup SQL parameter-order defect is fixed.
+A closed-writer/read-only three-model regression covers the audit and rejects a
+wrong exact identity. Export now waits for owned Docker cleanup and reservation
+ownership checks before no-clobber promotion. Closed runtime-generated CoEdIT
+failures are forwarded, and resource tracking distinguishes actually created,
+uncertain and uncreated resources without authorizing foreign deletion.
+Bootstrap uses verified supported optima and equal buffers, pins the complete
+profile on later lookup, and configures the direct owned daemon/native batcher.
+The privileged image broker still cannot apply SmolLM p>1 and fails closed.
+
+Focused independent local verification uses:
+
+```sh
+.venv/bin/python -W error -m unittest -v tests.unit.test_debug_trace tests.unit.test_run_measurement_matrix tests.unit.test_measure_profiles tests.unit.test_capacity_measurement_runner tests.unit.test_measured_profile_persistence tests.unit.test_capacity_measurement tests.unit.test_profiles tests.unit.test_provisioning_rm_runner tests.unit.test_benchmark_requests tests.unit.test_bootstrap_bindings tests.unit.test_bootstrap_runtime tests.unit.test_bootstrap_supervisor tests.unit.test_python_worker tests.unit.test_coedit_provider tests.unit.test_coedit_benchmark_witness tests.integration.test_bootstrap_http
+```
+
+These tests own temporary registries, artifacts, fake providers and daemon
+instances, worker children, loopback services, and resource-command mocks.
+The final clean independent run passed **384 tests in 27.169s**; changed-source
+compilation and `git diff --check` passed, with no test corrections needed.
+They are regression evidence, not GPU profile approval or deployed E2E. The
+operator runner owns fresh UUID-named containers/volumes, reservation and staged
+export; cleanup gates promotion. The successful fresh matrix below supersedes
+the historical failures. Later cleanup-only hardening has local/real-SQLite
+regression evidence rather than a repeated GPU measurement run.
+
+The second fresh operation used image identity
+`8ed3a0610e4decc965660ff8c49fafb1053c387dc9ddd260845b79f2b82e1ffb`
+and lasted **1,002,547 ms**. The inner three-model measurement, persistence and
+store audit completed, but the outer runner returned `result_malformed` at
+`result_read`; no database, WAL/SHM or lock remained and owned Docker cleanup was
+proved. The 2,690-record bounded trace was not truncated. The inner producer's
+identity-only list caused model names to become `unknown`; object retention and
+composed file/stdout-to-validator regressions now fix that contract. Interruption
+regressions additionally cover remaining teardown attempts, owned host cleanup,
+descriptor closure and original `KeyboardInterrupt`/`SystemExit` preservation.
+Those failures were superseded by the successful fresh operation below.
+
+**Successful candidate provisioning operation:**
+
+```sh
+.venv/bin/python tools/compatibility/image_build.py verify --root . --base-image llm-compatibility-spike:candidate --base-context .compatibility/context --image llm-compatibility-adapter:phase5-20261007-123939 --identity .compatibility/phase5-20261007-123939-image-identity.json
+.venv/bin/python tools/compatibility/prepare_measurement.py verify --output .compatibility/measurement-bundle
+.venv/bin/python tools/compatibility/run_measurement_matrix.py --debug --image llm-compatibility-adapter:phase5-20261007-123939 --bundle .compatibility/measurement-bundle --gpu-uuid GPU-d15a7ff9-a19b-3ece-7510-759a0bca1963 --ollama-version 0.11.6 --ceiling 32 --output .compatibility/profiles-phase5-20261007-123939.sqlite
+```
+
+The verifiers passed; the operation exited0 in **1,018,468ms** with exactly three
+profiles, `db_retained:true` and `docker_cleanup:proved`. A separate readonly
+`ProfileStore.validate_all_measured` audit confirmed the exact matrix/GPU.
+The database is mode0444; no WAL/SHM, staged export, lock or failure sidecar
+remained after the final owned historical-sidecar cleanup. The 2,691-record
+bounded trace was not truncated. The runner owned
+fresh UUID-named resources and cleanup; the delegated operator removed only the
+unique output's SQLite sidecars after its additional readonly audit closed.
+Primary workspace inspection additionally found the old snapshot's
+`.profiles-phase5-20261007-123939.sqlite.tmp-wal` (0bytes) and `.tmp-shm`
+(32,768bytes). The operator rechecked regular-file UID/device/inode ownership
+before removing only those unique companions; no profile bytes changed. This
+corrects the earlier no-temporary-residue report. The final runner closes its
+readonly reader before capturing/removing identity-proved sidecars inside the
+private stage, blocks commit on cleanup/ownership failure, and has real SQLite
+audit/commit regressions rather than a mocked audit.
+
+| Model | N / optimal / buffer | Raw samples | Exact profile identity |
+| --- | --- | ---: | --- |
+| SmolLM | 32 / 32 / 32 | 59 | `caa541c2fe144fc7d9e3b34d15ab25408ff5d337d5fe0a623ad114cbcd8ad181` |
+| CoEdIT | 32 / 32 / 32 | 59 | `dd8cbb6c37178323da0dc900b071b89f00e52f577fd149062cfddce5bc52b94f` |
+| GECToR | 1 / 1 / 1 | 9 | `0b058ce99abcc5ae6366aa10b4afd5bf8b60f42e364fc53b1e90351c69b4e203` |
+
+All records bind GPU `GPU-d15a7ff9-a19b-3ece-7510-759a0bca1963`, selected artifact
+manifest `7abbd93bd3e4ec01ba01f8e4581821ae1d2f35cab720695c1309596df5614a19`,
+the canonical matrix selectors and a20% reserve. Runtime versions are Ollama
+0.11.6; Python3.12.3/Torch2.7.1+cu128/Transformers4.49.0/tokenizers0.21.0/
+safetensors0.5.3, plus gector1.2.0 for GECToR. The immutable execution image
+identity is `95096d0186b37a1974be9b090c13ba0bb9446f3a5ad7f5550f2e368c62877a7d`.
+The final-source image `llm-compatibility-adapter:phase5-20261007-131614-final`
+has identity `8929e8c0655d07f2c4b709b1f71a3a32d376984232e48d3709e57e080f7bb590`;
+its later private-staging/SQLite-sidecar hardening has local regression/review evidence, not
+execution evidence from the above snapshot. Final scoped review found no
+remaining issues.
+
+The final handoff image also passed:
+
+```sh
+.venv/bin/python tools/compatibility/image_build.py verify --root . --base-image llm-compatibility-spike:candidate --base-context .compatibility/context --image llm-compatibility-adapter:phase5-20261007-131614-final --identity .compatibility/phase5-20261007-131614-final-image-identity.json
+```
+
+This establishes source/package equivalence, not a second GPU run or production
+image acceptance.
+
+The successful export is candidate measured-capacity evidence, not approved
+Phase1 production inputs or qualifying deployed E2E. It has not been installed
+as the canonical production set; privileged-broker SmolLM p>1 support and
+production-boundary acceptance remain open. G0/G4.1/G4.2/G4.3 stay **partial**.
+
+**Accepted phase scope (2026-10-07):** the user accepted the provisioning scripts
+and current measured matrix as Phase 5 complete, including GECToR p=1. That
+acceptance does not waive exact-identity checks, the 20% reserve, the measured
+workload limits or future remeasurement for changed identities/shapes. Phase 1
+owns production image/pin approval and privileged-broker SmolLM p32 support;
+Phase 6 owns canonical production profile installation and qualifying deployed
+E2E. No goal status is promoted by this bounded plan closure.
+
+## Historical Phase 5 actual-GPU attempt (2026-09-18)
 
 **Failed/incomplete operator/GPU evidence, not qualifying E2E or capacity proof.**
 The exact target was `GPU-d15a7ff9-a19b-3ece-7510-759a0bca1963` (RTX 4070 Ti,

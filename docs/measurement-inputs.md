@@ -44,7 +44,8 @@ workflow. For full-matrix work, use the all-or-nothing runner. It creates fresh
 owned bundle, runtime, result, and export volumes, verifies the pristine bundle
 in-image, performs two bounded foreign-compute checks, and uses `--network none`
 and `--pid=host` with the exact GPU. There is no resume or partial promotion;
-success requires all three selectors, while failures export nothing:
+success requires all three selectors. Measurement, audit, reservation, and owned
+Docker cleanup failures before commit export nothing:
 
 ```sh
 .venv/bin/python tools/compatibility/run_measurement_matrix.py \
@@ -78,9 +79,23 @@ SHM residue before installation. Existing lock files are treated as live or
 ambiguous ownership: the runner fails closed and never applies an automatic
 stale-lock timeout or removes another owner’s lock. The operator emits exactly
 one sanitized JSON status line on both success and failure; a zero exit status
-is possible only after export audit, promotion, lock release, and owned Docker
-cleanup have all succeeded. Therefore a real invocation cannot claim success
-with no output under this contract.
+is possible only after export audit, owned Docker cleanup, no-clobber promotion,
+and lock release have all succeeded. The audited host copy is staged before
+Docker cleanup but is not promoted until cleanup and reservation ownership are
+proved. UUID-named Docker resources require positive owner-label proof; container
+operations use verified immutable IDs, and volume metadata is rechecked before
+use/removal. Export copying uses a fresh private staging directory with tracked
+file/directory identities, so a proved partial copy is cleaned without blocking
+a retry or deleting substituted foreign paths. Interruptions attempt remaining
+owned teardown and host cleanup before propagating. These checks assume no
+hostile concurrent same-UID/root filesystem or Docker-daemon mutation; Docker
+volumes do not provide an atomic inspect-and-remove operation.
+A postcommit durability or lock-release failure reports an incomplete
+result with `db_retained: true`; it does not silently delete a committed audited
+database. Inspect that explicit result and retained ownership evidence before
+retrying, and never overwrite the destination or another owner's lock.
+Therefore a real invocation cannot claim success with no output under this
+contract.
 
 For manual transfer/debugging only, use the lower-level immutable bundle
 workflow with exactly one fresh writable runtime volume:

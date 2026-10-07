@@ -11,12 +11,53 @@ ownership.
 G0 (durable, truthful, capacity-aware asynchronous LLM work) and G1–G4 remain
 `partial`. **No leaf goal is done.** The evidence below is unit, local
 integration, synthetic, candidate-image, or locally run installed-adapter
-evidence. It is not a production deployment, measured capacity profile, or
-qualifying production-boundary E2E. Phases 0, 2, 3 and 4 have met their respective
+evidence. It is not a production deployment, approved production capacity profile, or
+qualifying production-boundary E2E. Phases 0, 2, 3, 4 and 5 have met their respective
 contract, local acceptance and candidate exits.
-The evidence does not replace the compatibility procedure, real concurrent
-capacity sweep, production image acceptance, restart/failure E2E, or operations
-work in the [canonical plan](queue-scheduler-resource-manager-plan.md).
+The completed candidate matrix does not waive the compatibility procedure,
+remeasurement for changed GPU/artifact/runtime/adapter/request identities,
+production image acceptance, restart/failure E2E, or operations work in the
+[canonical plan](queue-scheduler-resource-manager-plan.md).
+
+## Phase 5 candidate provisioning complete — 2026-10-07
+
+**Accepted bounded phase closure:** the user accepted the provisioning scripts
+and current measured three-model matrix, including GECToR at p=1. No higher
+GECToR concurrency is required for this scope. Production image/pin approval and
+privileged-broker capacity integration remain explicit Phase 1 gates; canonical
+production profile installation and deployed acceptance remain Phase 6 gates.
+
+The fresh offline exact-GPU matrix completed all three models, the inner
+read-only profile-store audit, lifecycle cleanup, outer result validation,
+export audit and no-clobber readonly promotion. It exited 0 in **1,018.468s**
+with `docker_cleanup: proved`. The candidate database
+`.compatibility/profiles-phase5-20261007-123939.sqlite` contains exactly three
+measured profiles at mode `0444`; no WAL/SHM, temporary export, lock or failure
+sidecar remained after final audit and owned historical-sidecar cleanup. All
+three records retain a 20% reserve:
+SmolLM context512 and CoEdIT's canonical input128/output64 bucket have
+`N=32, optimal_parallelism=32, m=32`; GECToR's fixed bucket has `N=1, p=1, m=1`.
+
+Two earlier fresh runs exposed and now have regressions for exact-context SQL
+parameter ordering and model names lost from identity-only result summaries.
+Runner ownership, cleanup-before-commit, interruptions, private staging and
+closed diagnostics were hardened. Independent final local verification passed
+**384 tests in 27.169s**, compilation and whitespace checks; final scoped review
+found no remaining issues. The successful GPU run's immutable image identity is
+`95096d0186b37a1974be9b090c13ba0bb9446f3a5ad7f5550f2e368c62877a7d`.
+The later final source image includes additional private-staging/real SQLite
+sidecar cleanup hardening with
+local test/review evidence, not execution evidence from that measurement run.
+
+This completes the working candidate provisioning scripts and candidate export,
+not Phase 1 approval, canonical production profile installation, composed
+production readiness or qualifying goal E2E. In particular, the privileged
+broker still fails closed for SmolLM p>1. G0/G4.1/G4.2/G4.3 remain `partial`;
+closing this bounded Phase 5 section does not close those production gates.
+Exact commands/profile
+identities and cleanup ownership are in the
+[proof inventory](../.opencode/skills/goal-oriented-design/references/e2e-proof.md#phase-5-provisioning-continuation-2026-10-07);
+continue with the [open plan](queue-scheduler-resource-manager-plan.md#next-concentration).
 
 ## Phase 0 complete — Contracts and validated bindings
 

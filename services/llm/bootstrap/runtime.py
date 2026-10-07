@@ -21,6 +21,7 @@ from services.llm.health import register_routes
 from services.llm.providers.gpu import LinuxGPUProof
 from services.llm.providers.config import GPUProof
 from services.llm.queue.results import ResultStore
+from services.llm.queue.contracts import ModelId
 from services.llm.resource_manager.core import ResourceManager
 from services.llm.resource_manager.health import ResourceManagerHealthBoundary
 from services.llm.resource_manager.http import ResourceManagerHttpServer
@@ -231,14 +232,25 @@ class BootstrapRuntime:
                                                   host_pid_namespace=self.options.host_pid_namespace)
             if self._fenced: raise RuntimeError("runtime is fenced")
             typed_proof = self._typed_proof()
-            self.daemon = self._daemon_factory(self.config, typed_proof)
+            # Preflight the exact immutable profiles before constructing either
+            # the owned daemon or runtime providers.  In particular, Ollama's
+            # process concurrency is selected from the measured profile, not
+            # from a speculative/default p=1 setting.
+            configured_ollama = self.config.models["SmolLM"].runtime_identity
+            if not configured_ollama.startswith("ollama:") or not configured_ollama[7:]:
+                raise ValueError("configured SmolLM runtime identity is not an Ollama version")
+            expected_identities = observe_runtime_identities(configured_ollama[7:])
+            self.prepared = await prepare_bindings(self.config, typed_proof, expected_identities)
+            if self._fenced: raise RuntimeError("runtime is fenced")
+            smollm_capacity = self.prepared.profiles[ModelId.SMOLLM].optimal_parallelism
+            self.daemon = self._daemon_factory(self.config, typed_proof, num_parallel=smollm_capacity)
             version = await self.daemon.start()
             self._daemon_started = True
             self._ollama_version = version
             if self._fenced: raise RuntimeError("runtime is fenced")
             observed = observe_runtime_identities(version)
-            self.prepared = await prepare_bindings(self.config, typed_proof, observed)
-            if self._fenced: raise RuntimeError("runtime is fenced")
+            if observed != expected_identities:
+                raise ValueError("runtime identity changed after measured profile preflight")
             self.result_store = ResultStore(self.options.result_dir)
             self.http = ResourceManagerHttpServer(self.core, bindings=dict(self.prepared.bindings),
                                                   result_store=self.result_store)

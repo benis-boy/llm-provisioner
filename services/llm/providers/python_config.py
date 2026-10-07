@@ -36,6 +36,9 @@ class PythonProviderConfig:
     request_timeout_seconds: float = 120.0
     rpc_frame_limit: int = 256 * 1024
     gpu_proof: GPUProof | None = None
+    # The selector identifies the canonical request shape (p1 in runtime
+    # bootstrap); native capacity is measured independently and may be greater.
+    bucket_batch_size: int | None = None
 
     def __post_init__(self) -> None:
         for value, name in ((self.manifest_sha256, "manifest digest"), (self.model_sha256, "model digest")):
@@ -57,6 +60,13 @@ class PythonProviderConfig:
             raise ValueError("CoEdIT generation must be deterministic")
         if type(self.max_native_batch_size) is not int or not 1 <= self.max_native_batch_size <= self.MAX_NATIVE_BATCH_SIZE:
             raise ValueError(f"native batch size must be between 1 and {self.MAX_NATIVE_BATCH_SIZE}")
+        if self.bucket_batch_size is None:
+            # Preserve the explicit legacy pN selector configuration while
+            # allowing bootstrap to bind the p1 selector to a measured pN
+            # runtime capability only through an explicit bootstrap override.
+            object.__setattr__(self, "bucket_batch_size", self.max_native_batch_size)
+        if type(self.bucket_batch_size) is not int or not 1 <= self.bucket_batch_size <= self.MAX_NATIVE_BATCH_SIZE:
+            raise ValueError("bucket batch size is outside the supported selector range")
         if self.measurement_max_native_batch_size is not None and (
                 type(self.measurement_max_native_batch_size) is not int or
                 not self.max_native_batch_size <= self.measurement_max_native_batch_size <= self.MAX_NATIVE_BATCH_SIZE):
@@ -66,10 +76,10 @@ class PythonProviderConfig:
             raise ValueError("native batch delay must be between zero and one second")
         if self.native_batch_delay_seconds != self.NATIVE_BATCH_DELAY_SECONDS:
             raise ValueError("native batch delay is fixed by the CoEdIT batch identity")
-        expected_bucket = (f"coedit:p{self.max_native_batch_size}:input{self.max_input_tokens}:output{self.max_output_tokens}:"
+        expected_bucket = (f"coedit:p{self.bucket_batch_size}:input{self.max_input_tokens}:output{self.max_output_tokens}:"
                            f"{self.dtype}:beams{parameters['num_beams']}:nosample")
         if self.bucket_identity != expected_bucket:
-            raise ValueError("bucket identity must bind CoEdIT shape, dtype, generation, and native batch")
+            raise ValueError("bucket identity must bind CoEdIT selector shape, dtype, and generation")
         if not isinstance(self.request_timeout_seconds, (int, float)) or isinstance(self.request_timeout_seconds, bool) or not math.isfinite(self.request_timeout_seconds) or self.request_timeout_seconds <= 0:
             raise ValueError("request timeout must be positive")
         if type(self.rpc_frame_limit) is not int or not 1024 <= self.rpc_frame_limit <= 256 * 1024:

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 import tempfile
@@ -36,6 +37,20 @@ def fixture(context=2048, fingerprint="test", walls=None, optimal=2):
     return profile, metadata
 
 
+def bucket_fixture(model, bucket, fingerprint):
+    profile, metadata = fixture(fingerprint=fingerprint)
+    identity = {
+        "model_id": model.value, "gpu_uuid": "gpu", "artifact_manifest_hash": "manifest",
+        "model_hash": "model", "runtime_identity": "runtime", "adapter_identity": "adapter",
+        "context_size": None, "bucket_identity": bucket, "fingerprint": fingerprint,
+    }
+    profile = replace(profile, model_id=model, profile_identity=hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        context_size=None, bucket_identity=bucket)
+    metadata = replace(metadata, representative_config=bucket)
+    return profile, metadata
+
+
 class ProfileStoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -65,6 +80,36 @@ class ProfileStoreTests(unittest.TestCase):
             found = store.lookup(ModelId.SMOLLM, "gpu", "manifest", "model", "runtime", "adapter", context_size=3000)
             self.assertEqual(found.context_size, 4096)
             self.assertIsNone(store.lookup(ModelId.SMOLLM, "gpu", "manifest", "model", "runtime", "adapter", context_size=8192))
+
+    def test_closed_writer_readonly_audit_rehydrates_exact_context_and_bucket_matrix(self):
+        smollm, smollm_metadata = fixture(context=4096, fingerprint="smollm")
+        coedit, coedit_metadata = bucket_fixture(ModelId.COEDIT, "coedit-bucket", "coedit")
+        gector, gector_metadata = bucket_fixture(ModelId.GECTOR, "gector-bucket", "gector")
+        profiles = (smollm, coedit, gector)
+        with ProfileStore(self.path) as store:
+            for profile, metadata in zip(
+                    profiles, (smollm_metadata, coedit_metadata, gector_metadata)):
+                store.save_measured(profile, metadata)
+
+        with ProfileStore.open_readonly(self.path) as store:
+            audited = store.validate_all_measured({p.profile_identity for p in profiles})
+            self.assertEqual({p.profile_identity for p in audited},
+                             {p.profile_identity for p in profiles})
+            self.assertEqual(
+                store.lookup(ModelId.SMOLLM, "gpu", "manifest", "model", "runtime", "adapter",
+                             context_size=4096, profile_identity=smollm.profile_identity),
+                smollm)
+            self.assertIsNone(
+                store.lookup(ModelId.SMOLLM, "gpu", "manifest", "model", "runtime", "adapter",
+                             context_size=4096, profile_identity="wrong-exact-identity"))
+            self.assertEqual(
+                store.lookup(ModelId.COEDIT, "gpu", "manifest", "model", "runtime", "adapter",
+                             bucket_identity="coedit-bucket", profile_identity=coedit.profile_identity),
+                coedit)
+            self.assertEqual(
+                store.lookup(ModelId.GECTOR, "gpu", "manifest", "model", "runtime", "adapter",
+                             bucket_identity="gector-bucket", profile_identity=gector.profile_identity),
+                gector)
 
     def test_duplicate_identical_is_noop_and_changed_content_conflicts(self):
         profile, metadata = fixture()

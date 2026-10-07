@@ -113,6 +113,12 @@ class OwnedOllama:
                 config.ollama_home != Path("/var/lib/ollama") or config.ollama_port != 11434 or
                 config.models["SmolLM"].runtime_identity != "ollama:0.11.6"):
             raise ValueError("image Ollama configuration must match the fixed broker")
+        if self._broker is not None and num_parallel != 1:
+            # The fixed privileged broker protocol has no capacity parameter.
+            # Never claim a measured p>1 profile while launching an unconfigured
+            # daemon; broker integration must add an authenticated capacity
+            # contract before those profiles can be admitted in that mode.
+            raise ValueError("fixed Ollama broker cannot apply measured parallelism")
         self.process: asyncio.subprocess.Process | None = None
         self._fence: _Fence | None = None
         self._stdout_task: asyncio.Task[None] | None = None

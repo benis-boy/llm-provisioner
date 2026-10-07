@@ -11,3 +11,8 @@
 *.model
 *.gguf
 *.safetensors
+
+# Generated Phase 5 run identities, measured registries and bounded failure traces.
+/.compatibility/phase5-*-image-identity.json
+/.compatibility/profiles-phase5-*.sqlite
+/.compatibility/profiles-phase5-*.sqlite.debug.jsonl

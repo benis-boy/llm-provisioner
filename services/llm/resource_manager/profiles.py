@@ -432,7 +432,7 @@ class ProfileStore:
                 values = (*params, context_size)
                 if profile_identity is not None:
                     query = query.replace("context_size>=? ORDER BY context_size, profile_identity LIMIT 2", "profile_identity=? AND context_size=?")
-                    values = (profile_identity, *params, context_size)
+                    values = (*params, profile_identity, context_size)
                 rows = self._db.execute(query, values).fetchall()
             else:
                 if not bucket_identity:

@@ -945,11 +945,11 @@ async def _run(args, config):
             if not measurement.profile_eligible:
                 raise _classified_measurement_failure(mid, measurement)
             identity = MeasuredProfileIdentity(mid, config.gpu_uuid, config.manifest_sha256, bindings.hashes[name], config.models[name].runtime_identity, config.models[name].adapter_identity, args.provenance, datetime.now(timezone.utc).isoformat(), context, bucket)
-            persisted.append(_persist_profile_or_classify(mid, request, measurement, identity, writer).profile.profile_identity)
+            persisted.append(_persist_profile_or_classify(mid, request, measurement, identity, writer).profile)
             trace("matrix", "persistence", "success", model=name, selector=selector)
         writer.close(); writer = None
         with ProfileStore.open_readonly(temporary) as audit:
-            audit.validate_all_measured(set(persisted))
+            audit.validate_all_measured({profile.profile_identity for profile in persisted})
         trace("matrix", "audit", "success", count=len(persisted))
         # Do not install until the owned daemon and all providers have cleaned up.
         import sqlite3

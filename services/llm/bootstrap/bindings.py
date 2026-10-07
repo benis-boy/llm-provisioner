@@ -17,7 +17,7 @@ from services.llm.provisioning.volume import verify_current
 from services.llm.queue.contracts import ModelId
 from services.llm.resource_manager.http import ModelBinding
 from services.llm.resource_manager.profiles import ProfileStore
-from services.llm.providers.config import GPUProof, SmolLMProviderConfig
+from services.llm.providers.config import GPUProof, SMOLLM_MAX_PARALLELISM, SmolLMProviderConfig
 from services.llm.providers.python_config import PythonProviderConfig
 from services.llm.providers.gector_config import GECToRProviderConfig
 from services.llm.providers.smollm import SmolLMProvider
@@ -25,6 +25,7 @@ from services.llm.providers.coedit import CoEdITProvider
 from services.llm.providers.gector import GECToRProvider
 from .config import BootstrapConfig, MODEL_IDS
 from .measurement_matrix import measurement_matrix
+from services.llm.providers.coedit_batch import CoEdITBatcher
 
 _OLLAMA = "ollama"
 # These are distribution names only.  In particular, observing GECToR must not
@@ -142,8 +143,11 @@ def _verify_and_hashes(config: BootstrapConfig) -> dict[str, str]:
     return result
 
 
+@dataclass(frozen=True)
 class PinnedModelBinding(ModelBinding):
     """Binding that cannot admit a larger context or a different bucket later."""
+    expected_profile: Any
+
     def resolve(self, *, context_size: int | None, bucket_identity: str | None):
         expected = 512 if self.model_id is ModelId.SMOLLM else _BUCKETS[self.model_id]
         if self.model_id is ModelId.SMOLLM:
@@ -153,14 +157,14 @@ class PinnedModelBinding(ModelBinding):
             raise ValueError("bootstrap binding only admits its measured bucket")
         profile, provider = super().resolve(context_size=context_size, bucket_identity=bucket_identity)
         # ProfileStore's general context lookup intentionally chooses the
-        # smallest adequate context.  Bootstrap's p=1 admission is stricter:
-        # the returned measured shape itself must be the proved shape.
+        # smallest adequate context.  Bootstrap pins both the selected shape
+        # and every measured capacity/evidence field, so a later registry
+        # change cannot expand admission beyond the prepared provider/daemon.
         if self.model_id is ModelId.SMOLLM:
             valid = profile.context_size == expected and profile.bucket_identity is None
         else:
             valid = profile.context_size is None and profile.bucket_identity == expected
-        if (not valid or profile.optimal_parallelism != 1 or profile.buffer_capacity != 1
-                or profile.safety_reserve_percent != 20):
+        if not valid or profile != self.expected_profile:
             raise ValueError("profile lookup did not return the pinned measured shape")
         return profile, provider
 
@@ -196,15 +200,21 @@ async def prepare_bindings(config: BootstrapConfig, gpu_proof: GPUProof,
     store = ProfileStore.open_readonly(config.profile_db)
     try:
         profiles = {}
+        capabilities = {ModelId.SMOLLM: SMOLLM_MAX_PARALLELISM,
+                        ModelId.COEDIT: CoEdITBatcher.MAX_NATIVE_BATCH_SIZE,
+                        ModelId.GECTOR: 1}
         for model in MODEL_IDS:
             mid = ModelId(model)
             kwargs = {"context_size": 512} if mid is ModelId.SMOLLM else {"bucket_identity": _BUCKETS[mid]}
             profile = store.lookup(mid, config.gpu_uuid, config.manifest_sha256, hashes[model],
                                    config.models[model].runtime_identity,
                                    config.models[model].adapter_identity, **kwargs)
-            if (profile is None or profile.optimal_parallelism != 1
-                    or profile.buffer_capacity != 1 or profile.safety_reserve_percent != 20):
-                raise ValueError(f"no exact measured p=1 profile for {model}")
+            if (profile is None or type(profile.optimal_parallelism) is not int
+                    or not 1 <= profile.optimal_parallelism <= capabilities[mid]
+                    or profile.memory_safe_n < profile.optimal_parallelism
+                    or profile.buffer_capacity != profile.optimal_parallelism
+                    or profile.safety_reserve_percent != 20):
+                raise ValueError(f"no exact supported measured capacity profile for {model}")
             if ((mid is ModelId.SMOLLM and (profile.context_size != 512 or profile.bucket_identity is not None)) or
                     (mid is not ModelId.SMOLLM and
                      (profile.context_size is not None or profile.bucket_identity != _BUCKETS[mid]))):
@@ -213,13 +223,13 @@ async def prepare_bindings(config: BootstrapConfig, gpu_proof: GPUProof,
         common = dict(artifact_root=config.artifact_root, manifest_sha256=config.manifest_sha256,
                       gpu_uuid=config.gpu_uuid, gpu_proof=gpu_proof)
         providers = {
-            ModelId.SMOLLM: SmolLMProvider(SmolLMProviderConfig(**common, model_sha256=hashes["SmolLM"], runtime_identity=config.models["SmolLM"].runtime_identity, adapter_identity=config.models["SmolLM"].adapter_identity, ollama_binary=str(config.ollama_binary), ollama_home=config.ollama_home, ollama_port=config.ollama_port)),
-            ModelId.COEDIT: CoEdITProvider(PythonProviderConfig(**common, model_sha256=hashes["CoEdIT"], runtime_identity=config.models["CoEdIT"].runtime_identity, adapter_identity=config.models["CoEdIT"].adapter_identity)),
+            ModelId.SMOLLM: SmolLMProvider(SmolLMProviderConfig(**common, model_sha256=hashes["SmolLM"], runtime_identity=config.models["SmolLM"].runtime_identity, adapter_identity=config.models["SmolLM"].adapter_identity, parallelism=profiles[ModelId.SMOLLM].optimal_parallelism, ollama_binary=str(config.ollama_binary), ollama_home=config.ollama_home, ollama_port=config.ollama_port)),
+            ModelId.COEDIT: CoEdITProvider(PythonProviderConfig(**common, model_sha256=hashes["CoEdIT"], runtime_identity=config.models["CoEdIT"].runtime_identity, adapter_identity=config.models["CoEdIT"].adapter_identity, max_native_batch_size=profiles[ModelId.COEDIT].optimal_parallelism, bucket_batch_size=1)),
             ModelId.GECTOR: GECToRProvider(GECToRProviderConfig(**common, model_sha256=hashes["GECToR"], runtime_identity=config.models["GECToR"].runtime_identity, adapter_identity=config.models["GECToR"].adapter_identity)),
         }
         bindings = {mid: PinnedModelBinding(mid, config.gpu_uuid, config.manifest_sha256,
                     hashes[mid.value], config.models[mid.value].runtime_identity,
-                    config.models[mid.value].adapter_identity, store, providers[mid]) for mid in ModelId}
+                    config.models[mid.value].adapter_identity, store, providers[mid], profiles[mid]) for mid in ModelId}
         return PreparedBindings(MappingProxyType(bindings), MappingProxyType(profiles), store)
     except BaseException:
         store.close()

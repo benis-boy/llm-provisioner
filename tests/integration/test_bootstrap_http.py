@@ -10,6 +10,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,6 +18,7 @@ from aiohttp import ClientSession, web
 from services.llm.health import HealthBoundary, register_routes
 
 from services.llm.bootstrap.runtime import BootstrapRuntime, RuntimeOptions
+from services.llm.bootstrap.config import ModelConfig
 from services.llm.providers.config import GPUProof
 from services.llm.providers.gpu import ProcessIdentity
 from services.llm.resource_manager.protocol import ProviderResponse
@@ -48,9 +50,10 @@ class FakeProvider:
 
 
 class FakeDaemon:
-    def __init__(self, config, proof):
+    def __init__(self, config, proof, *, num_parallel=1):
         self.alive_now = True
         self.closed = False
+        self.num_parallel = num_parallel
     async def start(self): return "fake-ollama"
     async def health(self): return None
     async def alive(self): return self.alive_now
@@ -69,14 +72,19 @@ class FakeCapture:
         return Proof()
 
 
-def _runtime(root, *, port, free_space=None):
+def _runtime(root, *, port, free_space=None, capacities=None):
     config, document, hashes, runtime = _provisioned_config(root)
+    runtime = dict(runtime)
+    runtime["SmolLM"] = "ollama:fake-ollama"
+    config = replace(config, models={name: ModelConfig(runtime[name], config.models[name].adapter_identity)
+                                    for name in runtime})
     with ProfileStore(config.profile_db) as store:
         for model in ModelId:
             name = model.value
             profile, metadata = _profile(model, config.manifest_sha256, hashes[name], runtime[name],
                                         f"adapter-{name}", context=512 if model is ModelId.SMOLLM else None,
-                                        bucket=None if model is ModelId.SMOLLM else _BUCKETS[model])
+                                        bucket=None if model is ModelId.SMOLLM else _BUCKETS[model],
+                                        optimum=(capacities or {}).get(model, 1))
             store.save_measured(profile, metadata)
     proof_capture = FakeCapture()
     options = RuntimeOptions(Path(root) / "state", Path(root) / "results", port=port,
@@ -166,6 +174,54 @@ class BootstrapHttpTests(unittest.TestCase):
         # the provider contract is covered by the focused RM watch tests.
         asyncio.run(scenario())
 
+    def test_measured_capacity_drives_daemon_provider_and_http_admission(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as directory:
+                capacities = {ModelId.SMOLLM: 2, ModelId.COEDIT: 2, ModelId.GECTOR: 1}
+                config, options, capture, identities = _runtime(
+                    Path(directory), port=19001, capacities=capacities)
+                with patch("services.llm.bootstrap.runtime.observe_runtime_identities",
+                           return_value=identities), \
+                     patch("services.llm.bootstrap.bindings.SmolLMProvider", FakeProvider), \
+                     patch("services.llm.bootstrap.bindings.CoEdITProvider", FakeProvider), \
+                     patch("services.llm.bootstrap.bindings.GECToRProvider", FakeProvider):
+                    runtime = BootstrapRuntime(config, options, proof_capture=capture,
+                                               daemon_factory=FakeDaemon)
+                    await runtime.start()
+                    try:
+                        self.assertEqual(runtime.daemon.num_parallel, 2)
+                        self.assertEqual(runtime.prepared.bindings[ModelId.SMOLLM].provider.config.parallelism, 2)
+                        coedit = runtime.prepared.bindings[ModelId.COEDIT].provider.config
+                        self.assertEqual(coedit.max_native_batch_size, 2)
+                        self.assertEqual(coedit.bucket_identity, _BUCKETS[ModelId.COEDIT])
+                        self.assertIsNone(coedit.measurement_max_native_batch_size)
+                        async with ClientSession() as session:
+                            base = "http://127.0.0.1:19001"
+                            status, value = await _request(session, "POST", base + "/resource-manager/sessions",
+                                json={"schedulerId":"s", "modelId":"SmolLM", "contextSizeEstimate":512},
+                                headers={"Idempotency-Key":"measured-p2"})
+                            self.assertEqual(status, 201)
+                            token = value["sessionToken"]
+                            status, capacity = await _request(session, "GET", base + f"/resource-manager/sessions/{token}/capacity")
+                            self.assertEqual(status, 200)
+                            self.assertEqual(capacity["profile"]["optimalParallelism"], 2)
+                            self.assertEqual(capacity["executionSlots"], 2)
+                            self.assertEqual(capacity["bufferSlots"], 2)
+                            status, coedit_session = await _request(
+                                session, "POST", base + "/resource-manager/sessions",
+                                json={"schedulerId":"coedit-s", "modelId":"CoEdIT",
+                                      "bucketIdentity":_BUCKETS[ModelId.COEDIT]},
+                                headers={"Idempotency-Key":"coedit-measured-p2"})
+                            self.assertEqual(status, 201)
+                            status, coedit_capacity = await _request(
+                                session, "GET", base + f"/resource-manager/sessions/{coedit_session['sessionToken']}/capacity")
+                            self.assertEqual(status, 200)
+                            self.assertEqual(coedit_capacity["executionSlots"], 2)
+                            self.assertEqual(coedit_capacity["bufferSlots"], 2)
+                    finally:
+                        await runtime.stop()
+        asyncio.run(scenario())
+
     def test_artifact_profile_and_free_space_gate_admission(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as directory:
@@ -198,8 +254,8 @@ class BootstrapHttpTests(unittest.TestCase):
                 config, options, capture, identities = _runtime(Path(directory), port=18993)
                 daemon = None
                 class ExitingDaemon(FakeDaemon):
-                    def __init__(self, config, proof):
-                        super().__init__(config, proof)
+                    def __init__(self, config, proof, *, num_parallel=1):
+                        super().__init__(config, proof, num_parallel=num_parallel)
                         nonlocal daemon
                         daemon = self
                     async def alive(self): return False
@@ -389,8 +445,8 @@ class BootstrapHttpTests(unittest.TestCase):
                 config, options, capture, identities = _runtime(Path(directory), port=18997)
                 daemon = None
                 class LosingDaemon(FakeDaemon):
-                    def __init__(self, config, proof):
-                        super().__init__(config, proof)
+                    def __init__(self, config, proof, *, num_parallel=1):
+                        super().__init__(config, proof, num_parallel=num_parallel)
                         nonlocal daemon
                         daemon = self
                     async def alive(self):

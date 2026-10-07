@@ -321,3 +321,50 @@ preserves the exact closed CoEdIT witness category without high-volume request
 success records exhausting the trace; 195 focused tests pass. A fresh GPU run
 is still required to identify and correct the predicate, so G4.1/G4.2/G4.3 stay
 **partial**.
+
+The 2026-10-07 offline provisioning continuation passed current-source image and
+bundle verification and completed all three models' measurements and per-model
+persistence, superseding the earlier CoEdIT maximum-witness blocker. The final
+read-only store audit failed because exact-context/profile-identity SQL lookup
+bound parameters in the wrong order; no database was promoted and owned Docker
+cleanup was proved. That defect now has a three-model read-only audit regression.
+Export is staged until owned cleanup and reservation checks pass; closed CoEdIT
+generation failures are relayed. Ordinary bootstrap consumes supported measured
+optima with equal buffers and pins the complete profile, but the fixed privileged
+image broker still fails closed for SmolLM p>1. A fresh eligible full matrix and
+production-image/runtime proof remain open; G0/G4.1/G4.2/G4.3 stay **partial**.
+
+A second fresh run completed all measurements and the inner store audit but
+failed outer result validation: identity-only strings lost the model names in
+the bounded result envelope. The producer now retains profile objects and
+serializes only model/identity summaries, with composed boundary regressions.
+No database was retained and owned cleanup was proved. Interrupted host cleanup
+and positive Docker resource ownership also have focused regression coverage.
+Those failed runs were not eligible exports; the subsequent fresh run below
+supersedes them. All product goal statuses remain unchanged.
+
+The third fresh offline exact-GPU operation completed in 1,018.468 seconds and
+exported exactly three audited measured candidate profiles at mode0444 with
+proved owned Docker cleanup and no remaining WAL/SHM, staging or reservation.
+For this exact selected GPU/artifact/runtime set, SmolLM context512 and CoEdIT's
+fixed input128/output64 selector each have N=32/optimal32/buffer32; GECToR's fixed
+selector has N=1/optimal1/buffer1. All retain the20% reserve. The candidate
+database is not installed as the canonical production set. Final local
+regressions pass384 tests and final scoped review has no remaining findings.
+This is successful candidate provisioning evidence, not approved Phase1 inputs,
+privileged-broker p32 support, composed deployment readiness or qualifying E2E.
+G0/G4.1/G4.2/G4.3 remain **partial**.
+
+Final workspace inspection corrected the successful snapshot's host-cleanup
+report: two readonly-audit staging sidecars remained and were removed by the
+operator without changing profile bytes. The final runner captures/removes
+identity-proved sidecars after reader close and gates commit on clean staging;
+real SQLite regressions and final review cover this cleanup-only change.
+
+The user accepted Phase 5's bounded provisioning-script and current measured
+matrix completion, including GECToR p=1, on 2026-10-07. No higher GECToR
+concurrency is required for the current fixed selector. Phase 1 retains
+production image/pin approval and privileged-broker SmolLM p32 support; Phase 6
+retains canonical production profile installation and deployment/E2E proof.
+This plan-scope closure supports G4.1/G4.2/G4.3 under G0 without changing any
+`partial` status or extending capacity claims to new identities/workloads.

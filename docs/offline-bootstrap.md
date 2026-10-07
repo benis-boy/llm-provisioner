@@ -54,24 +54,29 @@ the Python version; the Ollama version comes from the supervisor health handshak
 Version fragments are bounded to 64 ASCII characters, excluding whitespace,
 control characters and identity delimiters. These
 observations are not HTTP-submitted identities and this module does not import
-Torch/CUDA or invent an identity. `prepare_bindings` verifies the selected current artifact
-volume and exact selected model files, requires measured (never draft) p=1
-profiles with a 20% safety reserve, and opens the existing profile database
-read-only.  The initial profiles are SmolLM context 512, CoEdIT's fixed
-`input128/output64/float16/beams1/nosample` bucket, and GECToR's fixed
-`tokens128/float32/iterations1` bucket.  `N > 1` remains diagnostic evidence;
-it is not confused with profile identity or used to synthesize capacity.
+Torch/CUDA or invent an identity. `prepare_bindings` verifies the selected current
+artifact volume and exact selected model files, requires measured (never draft)
+profiles with a 20% safety reserve and `m = optimal_parallelism`, and opens the
+existing profile database read-only. The profiles retain SmolLM context 512,
+CoEdIT's canonical `p1:input128:output64:float16:beams1:nosample` request selector,
+and GECToR's fixed `p1:tokens128:keep0:min0:iterations1:batch1:float32` selector.
+Execution capacity comes only from the validated profile's measured optimum,
+bounded by its memory-safe `N` and the provider's structural capability (32 for
+SmolLM/CoEdIT and 1 for GECToR), never from an operator search ceiling.
 
 The returned mapping contains immutable `ModelBinding` values and real,
 unloaded provider instances. Resolution is pinned to exactly context 512 for
 SmolLM and the fixed bucket for the other models, so later larger measured rows
-cannot be admitted accidentally.  This is an exact measured-profile admission:
-the selected row must itself carry context 512 or the exact fixed bucket, p=1,
-m=1, and the 20% reserve, including on every later resolution. A row measured at context 1024 never satisfies this
-bootstrap, even though the general profile registry can select a larger context
-for other callers.  `N > 1` samples are permitted as diagnostic evidence, but
-are not admission capacity and do not alter the p=1 identity. `close()` releases the owned read-only
-`ProfileStore`; all-or-nothing failures close it before propagating. Artifact
+cannot be admitted accidentally. The selected row must itself carry context 512
+or the exact fixed bucket, supported measured capacity, equal input buffer, and
+the 20% reserve. Every later resolution must return the complete same profile,
+including its identity, capacity and evidence. A row measured at context 1024
+never satisfies this bootstrap, even though the general profile registry can
+select a larger context for other callers. CoEdIT retains the canonical request
+selector while its normal native batcher is configured explicitly from the
+validated optimum, not from the provisioning-only exploration setting.
+`close()` releases the owned read-only `ProfileStore`; all-or-nothing failures
+close it before propagating. Artifact
 verification and hashing run in `asyncio.to_thread`; that thread produces no
 owned resources. The thread-affine SQLite store is opened only afterward on the
 event-loop thread. This is startup-only work, not request-path work, and
@@ -95,10 +100,16 @@ attestation (`--host-pid-namespace`), before creating `OwnedOllama` or any
 provider.  The attestation is intentionally not inferred or defaulted.  It
 converts the captured Linux proof into the typed `GPUProof` required by the
 supervisor and providers. It then performs
-the exact state SQLite/free-space preflight, starts the one private daemon,
-observes the installed runtime identities, performs the read-only artifact and
-profile preflight, and exposes the existing ResourceManager and health routes
-from one aiohttp listener.  The daemon monitor is private: daemon loss fences
+the exact state SQLite/free-space preflight and read-only artifact/profile
+preflight before constructing the private daemon with the measured SmolLM
+parallelism. Installed Python package metadata and the configured Ollama version
+bind this initial preflight; the subsequent daemon handshake must confirm the
+same runtime identity before HTTP admission starts. The fixed privileged image
+broker currently cannot apply a measured `p > 1`, so that mode fails closed
+rather than claiming unsupported daemon capacity. This remains a production-image
+integration gap; directly owned Ollama supports the measured setting.
+The runtime exposes ResourceManager and health routes from one aiohttp listener.
+The daemon monitor is private: daemon loss fences
 ResourceManager admission and there is no independent daemon restart.
 
 Stop fences admission and the active session first, stops the listener, joins

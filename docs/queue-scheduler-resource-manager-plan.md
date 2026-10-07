@@ -7,8 +7,10 @@ complete accepted work reliably and efficiently on fixed GPU resources without
 lost work, misleading progress, or unproved capacity. Bounded phase completion
 is not product-goal completion.
 
-Phases 0, 2, 3, and 4 have completed their bounded contract, local-acceptance,
-or candidate exits. Phases 1, 5, and 6 remain open. G0 and every G1.1–G4.3
+Phases 0, 2, 3, 4, and 5 have completed their bounded contract, local-acceptance,
+or candidate exits. Phase 5's provisioning scripts and current three-model
+measurement matrix were accepted on 2026-10-07, including GECToR at p=1.
+Phases 1 and 6 remain open. G0 and every G1.1–G4.3
 leaf remain `partial`; there is no qualifying production-boundary E2E. The
 [evidence ledger](queue-scheduler-resource-manager-plan-partial_completed.md)
 contains the completed-phase records, detailed evidence, historical candidates,
@@ -20,7 +22,7 @@ and the [goal/evidence inventory](../.opencode/skills/goal-oriented-design/refer
 - [x] Phase 3 — QueueScheduler behavior — [ledger record](queue-scheduler-resource-manager-plan-partial_completed.md#phase-3-complete--queuescheduler-behavior)
 - [x] Phase 4 — ResourceManager and adapter local/candidate exit — [ledger record](queue-scheduler-resource-manager-plan-partial_completed.md#phase-4-continuation--local-exit-and-exact-gpu-candidate-complete)
 - [ ] Phase 1 — compatibility and production image
-- [ ] Phase 5 — offline provisioning and measured capacity profiles
+- [x] Phase 5 — offline provisioning scripts and current measured profile matrix — [bounded completion record](queue-scheduler-resource-manager-plan-partial_completed.md#phase-5-candidate-provisioning-complete--2026-10-07)
 - [ ] Phase 6 — production-boundary proof and operations
 
 ## Fixed constraints for the remaining work
@@ -76,6 +78,9 @@ approved production inputs.
 - [ ] Run long-lived processes as distinct non-root `llm` and `ollama` users;
   keep Ollama on `127.0.0.1:11434`, use `tini`/a pinned supervisor, and verify
   ownership, WAL/fsync/space checks, selected UUID, and offline network policy.
+- [ ] Add and verify the privileged broker's measured-parallelism contract so
+  the production image can apply the accepted SmolLM p=32 profile. Until then,
+  broker startup above p=1 must fail closed; do not silently downgrade capacity.
 - [ ] Verify supervisor bootstrap, artifact/profile preflight, Ollama import,
   ResourceManager startup, five-second liveness/readiness/dependency checks,
   and readiness failure on missing/mismatched artifacts, profile, GPU, cleanup,
@@ -96,24 +101,32 @@ and ledger retain prior candidate limitations.
 
 ## Phase 5 — offline provisioning and measured capacity profiles
 
+**Complete for the accepted current matrix (2026-10-07).** This closes the
+provisioning scripts, exact offline measurements and audited immutable export,
+not production-image approval or deployment. Accepted optimal parallelism is
+SmolLM 32, CoEdIT 32 and GECToR 1, with equal buffers and a 20% reserve. GECToR's
+fixed p=1 capability is sufficient for this scope; no p>1 extension is required.
+The limits apply only to the recorded GPU, artifacts, runtime and request
+selectors. New identities or shapes require new measurements.
+
 - [x] Ingest the selected artifact set deterministically from configured
   parent-folder inputs. Copy only required files into a fresh content-addressed
   volume layer, verify hashes/transitive files, require GECToR vocabulary, and
   reject interrupted, incomplete, or changed selections. Never download.
-- [ ] Bootstrap the **actual** ResourceManager and its normal adapter, residency,
+- [x] Bootstrap the **actual** ResourceManager and its normal adapter, residency,
   admission, timing, cleanup, and fencing paths in provisioning mode; do not use
   a profiling-only substitute.
-- [ ] Generate or validate maximum-sized, adapter-valid benchmark requests and
+- [x] Generate or validate maximum-sized, adapter-valid benchmark requests and
   configure exact request buckets, dtype, generation parameters, native batch
   shape, context/iteration limits, and identity witnesses. Fail if safe
   generation is unavailable and no configured benchmark request exists.
-- [ ] For every model and configured Ollama context size, run the exact
+- [x] For every model and configured Ollama context size, run the exact
   measurement algorithm below.
-- [ ] Persist an immutable, exact-identity profile in SQLite, including artifact
+- [x] Persist an immutable, exact-identity profile in SQLite, including artifact
   hashes, GPU UUID, adapter/runtime identity, request fingerprint and bucket,
   baseline samples, memory-safe `N`, selected `optimal_parallelism`, `m`, 20%
   reserve, raw sweep samples, and provenance. Validate it before runtime use.
-- [ ] Make runtime fail closed when no matching profile exists or any identity,
+- [x] Make runtime fail closed when no matching profile exists or any identity,
   schema, evidence, or artifact metadata changes. Runtime must not benchmark,
   adapt capacity, or download.
 
@@ -144,14 +157,19 @@ establish `N`, a production throughput optimum, or profile eligibility. See the
 [memory-observation ledger](queue-scheduler-resource-manager-plan-partial_completed.md#memory-observation-precursor)
 and [CoEdIT capacity check](coedit-capacity-check.md).
 
-**Exit:** selected artifacts and the actual RM bootstrap pass offline; every
+**Bounded exit met:** selected artifacts and the actual RM provisioning bootstrap
+pass offline; every
 required exact measurement and identity validation produces a durable eligible
 profile with a proved memory-safe `N`, 20% reserve, tie-rule selection, and
 `m = optimal_parallelism`; runtime accepts only that exact profile and otherwise
-fails closed. No candidate image, bounded observation, or p=1 result is promoted
-to measured capacity.
+fails closed under local regression coverage. The complete actual-GPU matrix,
+not merely a candidate image, configured ceiling or synthetic p=1 result,
+establishes the measured records. Production-image approval and privileged-broker
+capacity integration remain Phase 1 work; canonical production profile selection,
+installation and deployed acceptance remain Phase 6 work. This accepted phase
+exit does not promote any product goal to `done`.
 
-### Current status (2026-09-21)
+### Historical status (2026-09-21)
 
 Artifact ingestion is the only Phase 5 checkbox complete. The artifact root
 `LLMs/g4-profile-measurement/current` currently selects manifest digest
@@ -271,31 +289,136 @@ record exhaustion. Focused verification now passes 195 tests. The specific
 CoEdIT witness predicate still requires one fresh rebuilt run to identify, so
 Phase 5 remains open and no capacity result is eligible.
 
+### Provisioning continuation (2026-10-07)
+
+An identity-tracked offline current-source image
+(`86539ea6ef25ed8c3a826e2a1b091a62216f095c06ecc69e35112884a78b509b`)
+and the prepared bundle passed their verifiers. The fresh full GPU matrix then
+completed measurement and per-model persistence for SmolLM, CoEdIT and GECToR,
+but failed its final read-only store audit with `CorruptProfileStore`. No database
+was promoted; owned Docker cleanup was proved. The bounded trace was not
+truncated. This supersedes the earlier CoEdIT maximum-witness blocker, but is
+still failure evidence, not an eligible profile or Phase 5 exit.
+
+The audit exposed incorrect SQL parameter ordering in exact-context/profile-
+identity lookup. That defect is now corrected with a closed-writer/read-only
+three-model audit regression. The outer runner now stages and audits the export
+before owned Docker cleanup and reservation checks, then performs no-clobber
+promotion; precommit cleanup failures cannot leave a success-path database.
+Closed runtime-generated CoEdIT request failures are relayed without exposing
+payloads. Ordinary bootstrap now configures supported measured optima and equal
+buffers rather than rejecting all `p > 1` profiles, and pins the complete
+prepared profile on later lookup. The fixed privileged image broker still
+rejects SmolLM `p > 1` because its protocol cannot apply that setting; this is an
+explicit production-image integration gap, not a reason to downgrade capacity.
+The hardened runner positively checks resource ownership before use/removal,
+uses immutable container IDs, and cleans reservation initialization faults.
+Independent local verification passes **384 tests in 27.169s**, with changed-
+source compilation and whitespace checks passing. This is regression evidence,
+not a production deployment or profile approval.
+The successive failures below are historical; the successful third run now
+establishes an eligible candidate export. The user accepted this bounded Phase 5
+completion, including GECToR p=1. Approved production profile selection,
+canonical installation and production-image/runtime evidence remain open in
+Phases 1 and 6; product goal statuses remain `partial`.
+
+The second fresh run (image identity
+`8ed3a0610e4decc965660ff8c49fafb1053c387dc9ddd260845b79f2b82e1ffb`)
+completed all three models and the inner store audit, then failed outer result
+validation with `result_malformed` in `result_read` after 1,002.547 seconds.
+No database was retained and owned Docker cleanup was proved. The producer had
+reduced persisted profile objects to identity strings, causing its bounded
+summaries to report model `unknown`. It now retains the objects, audits only
+their exact identity strings, and emits only model/identity fields. Composed
+result-file/CLI-to-outer-validator regressions cover this boundary without
+weakening the exact model contract. Interruptions now attempt remaining owned
+teardown and release identity-proved host staging/reservations/descriptors while
+preserving the original interruption. Neither failed run supplies a usable
+profile database; the subsequent fresh run below supersedes these blockers.
+
+The final hardened source snapshot built offline as
+`llm-compatibility-adapter:phase5-20261007-131614-final`, with image identity
+`8929e8c0655d07f2c4b709b1f71a3a32d376984232e48d3709e57e080f7bb590`.
+The handoff image passed the current-source/package-identity verifier.
+Independent review found no remaining issues in the scoped fixes. The successful
+third measurement operation used its earlier immutable snapshot
+`95096d0186b37a1974be9b090c13ba0bb9446f3a5ad7f5550f2e368c62877a7d`;
+the subsequent private-staging and SQLite-sidecar hardening has local regression/review
+evidence, not execution evidence from that snapshot. Neither image is approved
+as the Phase 1 production image.
+
+**Candidate provisioning completed:** the third fresh full matrix exited 0 in
+**1,018.468 seconds** (16m 58.468s), with exactly three measured profiles,
+`db_retained: true` and `docker_cleanup: proved`. The readonly export is
+`.compatibility/profiles-phase5-20261007-123939.sqlite`, mode `0444`.
+An additional readonly store audit confirmed the exact matrix and selected GPU;
+no WAL, SHM, export staging, reservation lock or failure sidecar remained after
+the final owned-sidecar cleanup. The
+2,691-record bounded trace was not truncated.
+
+The final workspace check found two historical staging companions left by the
+successful snapshot's readonly SQLite audit (0-byte WAL and 32,768-byte SHM).
+The operator removed only those verified unique files after readers closed;
+profile bytes were unchanged. The final runner now closes the reader, captures
+and removes identity-proved audit-created sidecars inside its private stage,
+and refuses commit on foreign substitutions or cleanup failure. Real SQLite
+regressions exercise this path rather than mocking the audit.
+
+| Model | Exact selector | Memory-safe N | Optimal p | Buffer m | Reserve |
+| --- | --- | ---: | ---: | ---: | ---: |
+| SmolLM | `smollm:context512` | 32 | 32 | 32 | 20% |
+| CoEdIT | `coedit:p1:input128:output64:float16:beams1:nosample` | 32 | 32 | 32 | 20% |
+| GECToR | `gector:p1:tokens128:keep0:min0:iterations1:batch1:float32` | 1 | 1 | 1 | 20% |
+
+These are exact candidate records for the selected GPU/artifacts/runtime, not
+universal bounds or production approval. They have not been installed as the
+canonical production profile set. Exact profile identities and operation
+commands are in the [proof inventory](../.opencode/skills/goal-oriented-design/references/e2e-proof.md#phase-5-provisioning-continuation-2026-10-07).
+
 ### Next concentration
 
-1. Rebuild the adapter image from verified inputs, then run the fresh
-   all-or-nothing three-entry matrix with `--debug` and the exact target GPU.
-   Inspect stderr and, on failure, the exclusively retained
-   `.compatibility/profiles.sqlite.debug.jsonl` for the last safe model, phase,
-   concurrency, wave, lifecycle operation, and bounded failure classification.
-2. Fix only if the trace proves a code defect, with focused tests, then rerun
-   the complete fresh matrix. Do not turn diagnostic output or a partial matrix
-   into capacity evidence.
-3. Do not resume, export, or promote partial temporary results.
+1. Complete Phase 1 approval of exact pins, provenance and the production image;
+   the working provisioning scripts and candidate database do not waive it.
+2. Resolve the privileged broker's measured-parallelism contract before using
+   the SmolLM p=32 profile through that image. Until then, that path must fail
+   closed, never silently downgrade to an unmeasured p=1 configuration.
+3. Approve and install the exact immutable profile set through the operator-owned
+   canonical selection procedure, then establish composed runtime readiness and
+   the Phase 6 production-boundary E2E/operations evidence.
+4. For new GPU/artifact/runtime/adapter identities or request shapes, reproduce a
+   fresh all-or-nothing matrix with the guide below. Never resume or promote
+   partial results; retain a uniquely named bounded failure sidecar if it fails.
 
 ### Practical continuation guide
 
 1. Before rebuilding, verify the retained compatibility base-image identity and
    the prepared `.compatibility/adapter-deps/requirements.lock` and `wheelhouse/`
    inputs; this candidate Dockerfile does not create or approve those inputs.
-   Then rebuild offline, naming the already-verified local base explicitly:
+    Then rebuild offline with the identity-tracked helper, naming the
+    already-verified local base explicitly. Use a unique run name for the image,
+    identity file, output database and failure sidecar; do not reuse the old
+    `.compatibility/profiles.sqlite.debug.jsonl`:
 
-   ```sh
-   docker build --network=none \
-     --build-arg BASE_IMAGE=<verified-local-base> \
-     -f tools/compatibility/Dockerfile.adapter \
-     -t llm-compatibility-adapter:measure-profiles .
-   ```
+    ```sh
+    RUN=phase5-$(date -u +%Y%m%dT%H%M%SZ)
+    BASE='<verified-local-base>'
+    IMAGE=llm-compatibility-adapter:$RUN
+    IDENTITY=.compatibility/$RUN-image-identity.json
+    OUT=.compatibility/profiles-$RUN.sqlite
+    .venv/bin/python tools/compatibility/image_build.py identity \
+      --root . --base-image "$BASE" --base-context .compatibility/context \
+      --output "$IDENTITY"
+    .venv/bin/python tools/compatibility/image_build.py build-adapter \
+      --root . --base-image "$BASE" --base-context .compatibility/context \
+      --tag "$IMAGE" --identity "$IDENTITY"
+    .venv/bin/python tools/compatibility/image_build.py verify \
+      --root . --base-image "$BASE" --base-context .compatibility/context \
+      --image "$IMAGE" --identity "$IDENTITY"
+    ```
+    Stop if any command fails. The helper verifies locked wheel inputs, stages
+    only identity-listed source/dependencies, and binds the resulting image to
+    the inspected base and current source. A successful build is not Phase 1
+    production-image approval.
 2. Preflight the exact GPU UUID and owned-name namespace. If foreign GPU compute
    work is active, record the bounded fact and abort the uncontended measurement
    without inspecting, stopping, or controlling it. Then create fresh uniquely
@@ -307,14 +430,30 @@ Phase 5 remains open and no capacity result is eligible.
    `/opt/llm/measure_profiles.py`, not a second interpreter. Diagnostic mode
    omits `--provenance`; the full matrix requires it.
 3. Rerun the complete three-entry matrix sequentially. Do not resume, export,
-   or promote partial temporary results. Capacity stays fail closed unless all
-   required evidence and all three entries are eligible.
+    or promote partial temporary results. Capacity stays fail closed unless all
+    required evidence and all three entries are eligible.
+
+    For the prepared bundle, the operator runner performs the fresh-volume
+    transfer, in-image verification, exact-GPU checks and owned cleanup above:
+
+    ```sh
+    .venv/bin/python tools/compatibility/prepare_measurement.py verify \
+      --output .compatibility/measurement-bundle
+    .venv/bin/python tools/compatibility/run_measurement_matrix.py \
+      --debug --image "$IMAGE" --bundle .compatibility/measurement-bundle \
+      --gpu-uuid GPU-EXACT_UUID --ollama-version 0.11.6 --ceiling 32 \
+      --output "$OUT"
+    ```
+    Stop if bundle verification fails. Replace `GPU-EXACT_UUID` with the selected
+    UUID authenticated by the bundle. On failure, inspect the bounded stderr
+    and unique `$OUT.debug.jsonl`; no profile is eligible from a partial run.
 4. Only after that succeeds, close providers and the owned daemon, checkpoint,
    perform a read-only audit of the exact matrix and invariants, atomically
    install the immutable database, export the audited copy, set and verify mode
    `0444` on that exported copy, and then update the checklist, goal, and proof
    documents. The current atomic installer does not itself set the export mode.
-   Until then, leave every new checkbox open.
+   Until then, do not accept results for a new identity or shape. Production
+   selection and installation approval remains a separate Phase 6 gate.
 
 Testing execution is delegated per project process. The delegated operator must
 record the exact commands and their results, including failures and retained
@@ -323,6 +462,10 @@ evidence.
 
 ## Phase 6 — production-boundary proof and operations
 
+- [ ] Approve and install the exact immutable measured profile set as the
+  canonical production selection after Phase 1 image/pin approval. Verify
+  selected identities, readonly export and composed runtime readiness without
+  treating the accepted candidate measurements as deployment approval.
 - [ ] Deploy the approved production image and run a real
   QueueScheduler → ResourceManager → provider GPU E2E with durable named
   volumes, offline networking, selected UUID, exact artifacts/profile, and

@@ -25,12 +25,12 @@ def _sample(concurrency, wave, wall=10):
 
 
 def _profile(model, manifest_hash, model_hash, runtime, adapter, *, context=None, bucket=None,
-             fingerprint="fixture", draft=False):
+             fingerprint="fixture", draft=False, optimum=1):
     baseline = tuple(_sample(1, wave) for wave in range(4))
     warmup = (_sample(1, 0), _sample(2, 0))
     # N=2 is retained as diagnostic evidence, but its 20ms waves do not make it
     # the p=1 admission profile (p=1 is 10ms).
-    measured = tuple(_sample(n, wave, 10 if n == 1 else 20)
+    measured = tuple(_sample(n, wave, 10 if n == 1 or optimum == 2 else 20)
                      for n in (1, 2) for wave in range(1, 5))
     identity = {"model_id": model.value, "gpu_uuid": "GPU-test",
                 "artifact_manifest_hash": manifest_hash, "model_hash": model_hash,
@@ -38,7 +38,7 @@ def _profile(model, manifest_hash, model_hash, runtime, adapter, *, context=None
                 "context_size": context, "bucket_identity": bucket, "fingerprint": fingerprint}
     profile_id = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     profile = CapacityProfile(model, "GPU-test", manifest_hash, model_hash, runtime, adapter,
-                              profile_id, 1, 2, 1, 20, baseline + warmup + measured,
+                               profile_id, optimum, 2, optimum, 20, baseline + warmup + measured,
                               context, bucket)
     metadata = BenchmarkMetadata(fingerprint, "2026-09-16T00:00:00Z", "bootstrap-fixture",
                                  baseline, warmup, measured,
@@ -188,6 +188,104 @@ class BootstrapConfigTests(unittest.TestCase):
             path.write_text(json.dumps(document))
             with self.assertRaises(ValueError):
                 load_config(path)
+
+    def test_measured_parallelism_configures_runtime_adapters_and_preserves_selectors(self):
+        async def identity(): return "GPU-test"
+        proof = GPUProof(identity, lambda: True, expected_supervisor=ProcessIdentity(1, 2))
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, hashes, runtime = _provisioned_config(directory)
+            capacities = {ModelId.SMOLLM: 2, ModelId.COEDIT: 2, ModelId.GECTOR: 1}
+            with ProfileStore(config.profile_db) as registry:
+                for model in ModelId:
+                    name = model.value
+                    profile, metadata = _profile(
+                        model, config.manifest_sha256, hashes[name], runtime[name], f"adapter-{name}",
+                        context=512 if model is ModelId.SMOLLM else None,
+                        bucket=None if model is ModelId.SMOLLM else _BUCKETS[model],
+                        optimum=capacities[model])
+                    registry.save_measured(profile, metadata)
+            prepared = __import__("asyncio").run(prepare_bindings(config, proof, runtime))
+            try:
+                smollm = prepared.bindings[ModelId.SMOLLM].provider.config
+                coedit = prepared.bindings[ModelId.COEDIT].provider.config
+                gector = prepared.bindings[ModelId.GECTOR].provider.config
+                self.assertEqual(smollm.parallelism, 2)
+                self.assertEqual(coedit.max_native_batch_size, 2)
+                self.assertEqual(coedit.bucket_batch_size, 1)
+                self.assertEqual(coedit.bucket_identity, _BUCKETS[ModelId.COEDIT])
+                self.assertIsNone(coedit.measurement_max_native_batch_size)
+                self.assertEqual(gector.__class__.__name__, "GECToRProviderConfig")
+                self.assertEqual(prepared.bindings[ModelId.COEDIT].resolve(
+                    context_size=None, bucket_identity=_BUCKETS[ModelId.COEDIT])[0].admission_limit, 4)
+                self.assertEqual(prepared.bindings[ModelId.SMOLLM].resolve(
+                    context_size=512, bucket_identity=None)[0].admission_limit, 4)
+            finally:
+                prepared.close()
+
+    def test_prepare_rejects_capacity_above_gector_capability(self):
+        async def identity(): return "GPU-test"
+        proof = GPUProof(identity, lambda: True, expected_supervisor=ProcessIdentity(1, 2))
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, hashes, runtime = _provisioned_config(directory)
+            with ProfileStore(config.profile_db) as registry:
+                for model in ModelId:
+                    name = model.value
+                    profile, metadata = _profile(
+                        model, config.manifest_sha256, hashes[name], runtime[name], f"adapter-{name}",
+                        context=512 if model is ModelId.SMOLLM else None,
+                        bucket=None if model is ModelId.SMOLLM else _BUCKETS[model],
+                        optimum=2 if model is ModelId.GECTOR else 1)
+                    registry.save_measured(profile, metadata)
+            with self.assertRaisesRegex(ValueError, "supported measured capacity"):
+                __import__("asyncio").run(prepare_bindings(config, proof, runtime))
+
+    def test_prepare_rejects_profile_without_twenty_percent_reserve(self):
+        async def identity(): return "GPU-test"
+        proof = GPUProof(identity, lambda: True, expected_supervisor=ProcessIdentity(1, 2))
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, hashes, runtime = _provisioned_config(directory)
+            with ProfileStore(config.profile_db) as registry:
+                for model in ModelId:
+                    name = model.value
+                    profile, metadata = _profile(
+                        model, config.manifest_sha256, hashes[name], runtime[name], f"adapter-{name}",
+                        context=512 if model is ModelId.SMOLLM else None,
+                        bucket=None if model is ModelId.SMOLLM else _BUCKETS[model])
+                    registry.save_measured(profile, metadata)
+            lookup = ProfileStore.lookup
+            def changed_reserve(store, model, *args, **kwargs):
+                profile = lookup(store, model, *args, **kwargs)
+                if model is ModelId.COEDIT:
+                    return replace(profile, safety_reserve_percent=10)
+                return profile
+            with patch.object(ProfileStore, "lookup", changed_reserve):
+                with self.assertRaisesRegex(ValueError, "supported measured capacity"):
+                    __import__("asyncio").run(prepare_bindings(config, proof, runtime))
+
+    def test_pinned_binding_rejects_changed_capacity_after_preflight(self):
+        async def identity(): return "GPU-test"
+        proof = GPUProof(identity, lambda: True, expected_supervisor=ProcessIdentity(1, 2))
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, hashes, runtime = _provisioned_config(directory)
+            with ProfileStore(config.profile_db) as registry:
+                for model in ModelId:
+                    name = model.value
+                    profile, metadata = _profile(
+                        model, config.manifest_sha256, hashes[name], runtime[name], f"adapter-{name}",
+                        context=512 if model is ModelId.SMOLLM else None,
+                        bucket=None if model is ModelId.SMOLLM else _BUCKETS[model],
+                        optimum=2 if model is ModelId.SMOLLM else 1)
+                    registry.save_measured(profile, metadata)
+            prepared = __import__("asyncio").run(prepare_bindings(config, proof, runtime))
+            try:
+                binding = prepared.bindings[ModelId.SMOLLM]
+                changed = replace(prepared.profiles[ModelId.SMOLLM], optimal_parallelism=1,
+                                  buffer_capacity=1)
+                with patch.object(prepared._store, "lookup", return_value=changed):
+                    with self.assertRaisesRegex(ValueError, "pinned measured shape"):
+                        binding.resolve(context_size=512, bucket_identity=None)
+            finally:
+                prepared.close()
 
     def test_larger_context_cannot_substitute_for_pinned_512_profile(self):
         async def identity(): return "GPU-test"

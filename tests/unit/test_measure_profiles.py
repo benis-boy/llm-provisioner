@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 from contextlib import ExitStack
+from dataclasses import dataclass
 import tempfile
 import unittest
 from io import StringIO
@@ -25,6 +26,13 @@ from services.llm.provisioning.benchmark_requests import prepare_benchmark_reque
 from services.llm.provisioning.rm_runner import ProvisioningError
 from services.llm.resource_manager.protocol import Failure
 from tools.compatibility import measure_profiles
+
+
+@dataclass(frozen=True)
+class _SummaryProfile:
+    model_id: ModelId
+    profile_identity: str
+    internal_details: str = "/private/profile-data-not-for-transport"
 
 
 class _Proof:
@@ -112,6 +120,37 @@ class MeasureProfilesLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    async def test_run_retains_exact_profile_objects_and_audits_only_their_identities(self):
+        matrix = tuple(measurement_matrix())
+        expected = [_SummaryProfile(model, model.value + "-identity") for model, _ in matrix]
+        by_model = {profile.model_id: profile for profile in expected}
+        persisted_models = []
+        def persist(_request, _measurement, identity, _writer, **kwargs):
+            persisted_models.append(identity.model_id)
+            return SimpleNamespace(profile=by_model[identity.model_id])
+        audit = Mock()
+        audit.__enter__ = Mock(return_value=audit)
+        audit.__exit__ = Mock(return_value=False)
+        patches, events, bindings, _, _, install = self._patches()
+        install.side_effect = lambda *args, **kwargs: events.append("install")
+        with self._all(patches), \
+             patch.object(measure_profiles, "persist_measured_profile", side_effect=persist), \
+             patch.object(measure_profiles.ProfileStore, "open_readonly", return_value=audit):
+            result = await measure_profiles._run(self.args, self.config)
+        self.assertIsInstance(result, measure_profiles._MeasuredRun)
+        self.assertEqual(persisted_models, [model for model, _ in matrix])
+        self.assertEqual(len(result), 3)
+        for actual, profile in zip(result, expected, strict=True):
+            self.assertIs(actual, profile)
+        self.assertEqual(result.matrix, tuple((model.value, selector) for model, selector in matrix))
+        audit.validate_all_measured.assert_called_once_with(
+            {profile.profile_identity for profile in expected})
+        self.assertEqual([measure_profiles._profile_summary(profile)["model"] for profile in result],
+                         ["SmolLM", "CoEdIT", "GECToR"])
+        install.assert_called_once()
+        self.assertLess(events.index("daemon_close"), events.index("install"))
+        next(iter(bindings.bindings.values())).provider.unload.assert_awaited_once()
 
     async def test_global_ceiling_fences_gector_profile_before_provider_validation(self):
         """Binding construction applies each adapter's identity capability."""
@@ -476,10 +515,11 @@ class MeasureProfilesLifecycleTests(unittest.IsolatedAsyncioTestCase):
             return SimpleNamespace(profile_eligible=True, n=1)
 
         persisted_request = []
+        persisted_profile = _SummaryProfile(ModelId.COEDIT, "p")
         def persist(request, *args, **kwargs):
             events.append(("persist", request))
             persisted_request.append(request)
-            return SimpleNamespace(profile=SimpleNamespace(profile_identity="p"))
+            return SimpleNamespace(profile=persisted_profile)
 
         writer = Mock()
         store = Mock(); store.__enter__ = Mock(return_value=store); store.__exit__ = Mock(return_value=False)
@@ -514,7 +554,8 @@ class MeasureProfilesLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(generated, persisted_request[0])
         self.assertEqual({generated.fingerprint, measurement_request[0].fingerprint,
                           persisted_request[0].fingerprint}, {generated.fingerprint})
-        self.assertEqual(result, ["p"])
+        self.assertEqual(result, [persisted_profile])
+        self.assertIs(result[0], persisted_profile)
         self.assertIn("session_stop", events)
 
     async def test_smollm_runtime_restarts_at_each_requested_slot_count(self):
@@ -1139,7 +1180,9 @@ class MeasureProfilesLifecycleTests(unittest.IsolatedAsyncioTestCase):
         verifier = Mock(return_value=(config_path, requests_path, provenance_path, "a" * 64))
         argv = ["measure_profiles.py", "--bundle", str(bundle), "--db", str(self.args.db),
                 "--ollama-version", "0.11.6"]
-        profiles = measure_profiles._MeasuredRun(["profile"], tuple(measurement_matrix()))
+        profiles = measure_profiles._MeasuredRun(
+            [_SummaryProfile(model, model.value + "-identity") for model, _ in measurement_matrix()],
+            tuple(measurement_matrix()))
         run.return_value = profiles
         self.config.artifact_root = Path("/opt/measurement/artifacts")
         self.config.profile_db = self.args.db
@@ -1208,8 +1251,9 @@ class MeasureProfilesLifecycleTests(unittest.IsolatedAsyncioTestCase):
         requests_path = bundle / "requests.json"
         argv = ["measure_profiles.py", "--bundle", str(bundle),
                 "--db", str(self.args.db), "--ollama-version", "0.11.6"]
-        profiles = measure_profiles._MeasuredRun(["profile"],
-                                                  tuple(measurement_matrix()))
+        profiles = measure_profiles._MeasuredRun(
+            [_SummaryProfile(model, model.value + "-identity") for model, _ in measurement_matrix()],
+            tuple(measurement_matrix()))
         run = AsyncMock(return_value=profiles)
         with patch.object(measure_profiles, "verify_bundle_inputs",
                           return_value=(config_path, requests_path, bundle / "provenance.json", "test")), \
@@ -1224,7 +1268,12 @@ class MeasureProfilesLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(envelope), {"status", "matrix", "profiles"})
         self.assertEqual(envelope["status"], "complete")
         self.assertEqual(envelope["profiles"],
-                         [{"model": "unknown", "profile_identity": "profile"}])
+                         [{"model": profile.model_id.value, "profile_identity": profile.profile_identity}
+                          for profile in profiles])
+        self.assertEqual([item["model"] for item in envelope["profiles"]],
+                         ["SmolLM", "CoEdIT", "GECToR"])
+        self.assertEqual(len({item["profile_identity"] for item in envelope["profiles"]}), 3)
+        self.assertNotIn("/private/profile-data", output.getvalue())
         # JSON serialization normalizes the tuple pairs to arrays.
         self.assertEqual(envelope["matrix"], [list(pair) for pair in profiles.matrix])
 
