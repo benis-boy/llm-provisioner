@@ -1,6 +1,6 @@
 FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 
-ARG OPENCODE_VERSION=1.18.31
+ARG OPENCODE_VERSION=2.0.24
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -12,7 +12,7 @@ RUN apt-get update \
         python3 \
         python3-pip \
         python3-venv \
-    && npm install --global "opencode-ai@${OPENCODE_VERSION}" \
+    && npm install --global "@opencode/cli@${OPENCODE_VERSION}" \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*
 

@@ -43,7 +43,7 @@ When the prompt does not map cleanly to the tree, do not force it under a nearby
 - A child narrows its parent's outcome. It does not merely list the mechanism used to fulfill it.
 - Keep this skill compact. Put deeper child goals in linked product documentation rather than copying their detail here.
 - Use exactly these statuses: `target` means intended but not implemented; `partial` means only part of the outcome is implemented; `untested` means the outcome is implemented but required E2E proof is missing, regardless of unit tests; `done` means implemented and required E2E proof exists. Assess mixed branches conservatively: a parent remains partial when any essential child outcome is incomplete or unproven.
-- Examples such as arbitrary input, arbitrary analysis output, editable drafts, exports, or intent-aware spellchecking are candidate outcomes, not automatically current goals. Adopt them only when repository evidence or explicit product direction supports them.
+- Treat examples and ideas as candidate outcomes, not automatically current goals. Adopt them only when repository evidence or explicit product direction supports them.
 
 ## Leaf-Goal Proof Contract
 
@@ -79,6 +79,7 @@ the product tree.
 ## Required Design checklist
 
 - Read the relevant tree before mapping and the relevant proof inventory before verification selection.
-- State outcomes in plain text in every subagent assignment.
+- State every relevant outcome, including parent outcomes, in plain text in every subagent assignment.
 - Keep goals durable and concise; keep stable test IDs in proof inventories only.
+- For a specific Playwright delegation, prefer a stable exact test ID or title and provide the exact command; use a path only to disambiguate.
 - Reconcile mixed statuses conservatively and report proof gaps honestly.

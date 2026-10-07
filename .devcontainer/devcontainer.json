@@ -15,10 +15,9 @@
   ],
   "mounts": [
     "source=/mnt/d/AdeptusMechanicus/LLMs,target=/workspaces/llm-provider/LLMs,type=bind",
-    "source=${localEnv:HOME}/.config/opencode,target=/home/vscode/.config/opencode,type=bind,readonly",
-    "source=${localEnv:HOME}/.local/share/opencode/auth.json,target=/home/vscode/.local/share/opencode/auth.json,type=bind",
-    "source=${localEnv:HOME}/.local/share/opencode/account.json,target=/home/vscode/.local/share/opencode/account.json,type=bind",
+    "source=llm-provider-opencode-data,target=/home/vscode/.local/share/opencode,type=volume",
+    "source=/mnt/c/Users/benja/.local/share/opencode,target=/mnt/host-opencode,type=bind,readonly",
     "source=/proc,target=/host/proc,type=bind,readonly"
   ],
-  "postCreateCommand": "bash -ceu 'test -s /home/vscode/.local/share/opencode/auth.json && opencode --version && python3 -m venv .venv && .venv/bin/python -m pip install --editable .'"
+  "postCreateCommand": "bash -ceu 'test -d /home/vscode/.local/share/opencode && test -r /home/vscode/.local/share/opencode && test -w /home/vscode/.local/share/opencode && opencode --version && python3 -m venv .venv && .venv/bin/python -m pip install --editable .'"
 }

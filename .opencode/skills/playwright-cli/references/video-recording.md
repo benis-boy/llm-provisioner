@@ -60,5 +60,9 @@ async page => {
 
 ## Limitations
 
+Record only the named scenario and use disposable output paths. Videos can
+contain secrets and user data; do not commit them or claim browser readiness
+without a real smoke check in the target environment.
+
 - Recording adds slight overhead to automation
 - Large recordings can consume significant disk space

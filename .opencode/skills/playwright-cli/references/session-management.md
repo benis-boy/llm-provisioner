@@ -60,6 +60,10 @@ playwright-cli open example.com
 
 ## Common Patterns
 
+Use semantic session names (for example `-s=auth-check`) and always close
+them when finished. Use `close-all` only for cleanup of sessions owned by the
+current task; do not kill unrelated browser processes.
+
 ### Concurrent Scraping
 
 ```bash

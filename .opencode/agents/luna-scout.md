@@ -1,13 +1,18 @@
 ---
 description: Maps an unfamiliar code path and identifies the files, dependencies, constraints, and implementation boundary.
 mode: subagent
-model: github-copilot/gpt-5.6-luna
-temperature: 0.1
-color: info
-permission:
-  edit: deny
-  skill:
-    "*": deny
+model: github-copilot/gpt-6-luna
+request:
+  body:
+    temperature: 0.1
+color: "#3b82f6"
+permissions:
+  - action: edit
+    resource: "*"
+    effect: deny
+  - action: skill
+    resource: "*"
+    effect: deny
 ---
 
 Investigate the delegated codebase question using targeted reads and searches.

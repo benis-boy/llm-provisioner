@@ -243,6 +243,11 @@ playwright-cli open https://example.com
 
 ## Security Notes
 
+Storage-state files contain credentials and session data. Keep them in a
+disposable ignored location, never commit or paste their contents, and delete
+them after the assigned check unless a human explicitly requests retained
+evidence.
+
 - Never commit storage state files containing auth tokens
 - Add `*.auth-state.json` to `.gitignore`
 - Delete state files after automation completes

@@ -5,6 +5,12 @@ description: Automate browser interactions, test web pages and work with Playwri
 
 # Browser Automation with playwright-cli
 
+Use the repository's configured Playwright/test entrypoint when one exists;
+do not treat this copied skill as proof that the CLI, browser, or application
+is installed. Keep sessions named and disposable. Generated traces, videos,
+storage state, snapshots, and test output are temporary evidence unless the
+assignment explicitly names a checked-in artifact path.
+
 ## Quick start
 
 ```bash
@@ -331,8 +337,8 @@ playwright-cli -s=mysession open example.com --persistent
 # same with manually specified profile directory (use when requested explicitly)
 playwright-cli -s=mysession open example.com --profile=/path/to/profile
 playwright-cli -s=mysession click e6
-playwright-cli -s=mysession close
-playwright-cli -s=mysession delete-data
+playwright-cli -s=mysession close  # stop a named browser
+playwright-cli -s=mysession delete-data  # delete named persistent data
 
 playwright-cli list
 playwright-cli close-all

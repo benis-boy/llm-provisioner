@@ -69,6 +69,11 @@ playwright-cli tracing-stop
 
 ## Best Practices
 
+Treat traces and network logs as potentially sensitive, large temporary
+artifacts. Capture only the bounded flow needed for diagnosis, redact or avoid
+credentials, and remove outputs after the review unless an explicit evidence
+path is assigned.
+
 ### 1. Start Tracing Before the Problem
 
 ```bash

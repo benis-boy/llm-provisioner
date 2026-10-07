@@ -20,6 +20,10 @@ playwright-cli run-code --filename=./my-script.js
 The code must be a single function expression, it is wrapped in `(...)` and evaluated.
 import/export/require syntax is not supported.
 
+Keep scripts bounded and artifact-free by default. Save output only when the
+assignment names the destination; remove disposable traces, screenshots,
+videos, and state files after inspection.
+
 ## Geolocation
 
 ```bash

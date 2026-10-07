@@ -1,19 +1,36 @@
 ---
 description: Implements a bounded change and its focused tests within explicit file ownership.
 mode: subagent
-model: github-copilot/gpt-5.6-luna
-temperature: 0.2
-color: success
-permission:
-  skill:
-    "*": deny
-    golang-best-practices: allow
-    openapi-best-practices: allow
-    playwright-cli: allow
-    react-best-practices: allow
-    react-composition-patterns: allow
-    service-api-reliability: allow
-    web-design-guidelines: allow
+model: github-copilot/gpt-6-luna
+request:
+  body:
+    temperature: 0.2
+color: "#22c55e"
+permissions:
+  - action: skill
+    resource: "*"
+    effect: deny
+  - action: skill
+    resource: golang-best-practices
+    effect: allow
+  - action: skill
+    resource: openapi-best-practices
+    effect: allow
+  - action: skill
+    resource: playwright-cli
+    effect: allow
+  - action: skill
+    resource: react-best-practices
+    effect: allow
+  - action: skill
+    resource: react-composition-patterns
+    effect: allow
+  - action: skill
+    resource: service-api-reliability
+    effect: allow
+  - action: skill
+    resource: web-design-guidelines
+    effect: allow
 ---
 
 Complete the delegated implementation task directly.
@@ -22,7 +39,8 @@ Complete the delegated implementation task directly.
 - Stay inside the stated scope and file ownership. Report cross-cutting work instead of silently expanding the task.
 - Load project skills named in the assignment and any clearly required by the files involved.
 - Prefer the smallest correct change and preserve established patterns.
-- Add or update focused tests when behavior changes, and run the narrowest useful verification.
+- Add or update focused tests when behavior changes. Run only exact test cases you added or modified, using test-name/title selectors; fix scoped failures locally and rerun those cases. If isolation is unsupported, report the gap instead of broadening the run.
+- Do not run unchanged tests, existing suites, or broad commands.
 
 Return exactly these sections:
 

@@ -1,5 +1,9 @@
 # Test generation (plan -> generate -> heal)
 
+Use exact test titles or IDs for focused generation and verification. Do not
+run unchanged tests or a broad suite merely to validate a changed test; if the
+runner cannot isolate the changed case, report that verification gap.
+
 End-to-end workflow for authoring and maintaining Playwright tests with `playwright-cli`. Every `playwright-cli` action emits the equivalent Playwright TypeScript, and that generated code is the raw material for every test. The sections below can be used independently:
 
 - **How generation works** - the core mechanic everything else relies on: actions become TypeScript, plus how to add assertions.
