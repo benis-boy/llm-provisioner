@@ -1,5 +1,9 @@
 # Deterministic measurement inputs
 
+For the explicit, on-demand provisioning flow for the three selected core model
+artifacts, see [On-demand core model downloads](model-downloads.md). It does not
+run automatically and does not itself provide measurement or capacity evidence.
+
 Phase 5 preparation owns a small bundle of requests, identities, strict
 bootstrap configuration, and the selected artifact volume. It is not capacity
 evidence and does not authorize a measured profile.

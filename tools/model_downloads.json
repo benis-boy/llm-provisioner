@@ -1,0 +1,37 @@
+{
+  "models": {
+    "CoEdIT": {
+      "repo": "grammarly/coedit-large",
+      "revision": "5637bcdf9d8d4419f97c8cfea36f7d35c79232b6",
+      "files": [
+        {"path": "model.safetensors", "size": 3132439432, "sha256": "c692f68bca5c6899801bc9fad626fefd3359ccd95e26dccae4dd72186fd98852"},
+        {"path": "config.json", "size": 787, "sha256": "bca25a47a9ceab6fa63555b0eaab289e89735bcf1de6cc1dcb6bc57e88881c0d"},
+        {"path": "tokenizer.json", "size": 2422262, "sha256": "92c25d2e604250ffdcf35d7aec47931868ca92b35d6afe84dc039a47a3a87226"},
+        {"path": "tokenizer_config.json", "size": 2497, "sha256": "16dcefb67ade62dc4f5fb2b1be434e10116f8da40c964c2b43fcf7294944f397"},
+        {"path": "special_tokens_map.json", "size": 2201, "sha256": "5c87151ef0f72a99d1f766a4c418bd2a1f90aaa30a8e22fe5eca9641daebb64f"},
+        {"path": "spiece.model", "size": 791656, "sha256": "d60acb128cf7b7f2536e8f38a5b18a05535c9e14c7a355904270e15b0945ea86"},
+        {"path": "generation_config.json", "size": 142, "sha256": "eed058a57a4e9aa945c08aab951ae8455298d8912a5fe2d301caf0141595fd77"}
+      ]
+    },
+    "GECToR": {
+      "repo": "gotutiyan/gector-deberta-large-5k",
+      "revision": "5fa80d75504eaf7c867a0d4c5a26752df6585aa1",
+      "files": [
+        {"path": "model.safetensors", "size": 1641219900, "sha256": "f399c999ba19811601d685016fad4589fd397859b4ac1eca0c42fd8aeb0c9fe4"},
+        {"path": "config.json", "size": 299344, "sha256": "ad451a7184e2dfbf358c2a139ec4a4b1f0ff4e92638966ddff89d8ef00787b79"},
+        {"path": "tokenizer.json", "size": 2110055, "sha256": "2dae6d27ab6c71e94e0fc900ab3e145b1f93c3b3fd59d3a0115848fc12c05a8c"},
+        {"path": "tokenizer_config.json", "size": 1453, "sha256": "461be44aecf07edfecfa24dc8782a79d3fce6b132db5276712ff156d6b374d54"},
+        {"path": "special_tokens_map.json", "size": 1014, "sha256": "91da83d1dbe6bc07edf077bf28476c98cd8a7283cf5ed688a327b6dd6ecf761a"},
+        {"path": "verb-form-vocab.txt", "size": 4390076, "sha256": "5906804ec8a1acd8cbfc2918522bf429ce5edded8bbc46ffc2be861d280d3abf", "source": {"url": "https://raw.githubusercontent.com/grammarly/gector/3d41d2841512d2690cffce1b5ac6795fe9a0a5dd/data/verb-form-vocab.txt"}}
+      ]
+    },
+    "SmolLM": {
+      "repo": "unsloth/SmolLM2-1.7B-Instruct-GGUF",
+      "revision": "e933f1cdf73cc87cb67915bf5dd6ea81d36080ca",
+      "files": [
+        {"path": "SmolLM2-1.7B-Instruct-Q8_0.gguf", "size": 1820414624, "sha256": "0f3fb091804c48a561b42a4ca1be9ce2c353017187f74c48f52299cae790abe5"},
+        {"path": "Modelfile", "size": 39, "sha256": "87c04c4c0f28d57f67d51ddac6562374b80827a90ff8463a4a3dc7b5b41ef8e7"}
+      ]
+    }
+  }
+}
